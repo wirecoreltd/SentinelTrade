@@ -1,10 +1,14 @@
 // Proxy vers Alpha Vantage — la clé vient d'une variable d'environnement
 // côté serveur (ALPHA_VANTAGE_KEY), jamais exposée au navigateur.
+//
+// market=equity (défaut) : actions, ex. symbol=TSLA
+// market=fx              : devises et métaux (or=XAU, argent=XAG), ex. symbol=EUR ou XAU, coté contre USD
 
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
   const symbol = searchParams.get("symbol");
   const kind = searchParams.get("kind"); // "quote" ou "history"
+  const market = searchParams.get("market") || "equity";
   const key = process.env.ALPHA_VANTAGE_KEY;
 
   if (!symbol || !kind) {
@@ -17,11 +21,19 @@ export async function GET(request) {
     );
   }
 
-  const fn = kind === "history" ? "TIME_SERIES_DAILY" : "GLOBAL_QUOTE";
-  const extra = kind === "history" ? "&outputsize=compact" : "";
+  let url;
+  if (market === "fx") {
+    url =
+      kind === "history"
+        ? `https://www.alphavantage.co/query?function=FX_DAILY&from_symbol=${encodeURIComponent(symbol)}&to_symbol=USD&outputsize=compact&apikey=${key}`
+        : `https://www.alphavantage.co/query?function=CURRENCY_EXCHANGE_RATE&from_currency=${encodeURIComponent(symbol)}&to_currency=USD&apikey=${key}`;
+  } else {
+    const fn = kind === "history" ? "TIME_SERIES_DAILY" : "GLOBAL_QUOTE";
+    const extra = kind === "history" ? "&outputsize=compact" : "";
+    url = `https://www.alphavantage.co/query?function=${fn}&symbol=${encodeURIComponent(symbol)}&apikey=${key}${extra}`;
+  }
 
   try {
-    const url = `https://www.alphavantage.co/query?function=${fn}&symbol=${encodeURIComponent(symbol)}&apikey=${key}${extra}`;
     const res = await fetch(url);
     const data = await res.json();
     return Response.json(data);
