@@ -1,0 +1,17 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  background: #0e1420;
+  color: #eef1f6;
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+input:focus,
+button:focus {
+  outline: none;
+}
