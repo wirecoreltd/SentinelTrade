@@ -27,9 +27,28 @@ const NEG = "#FF6767";
 // Alpha Vantage renvoie l'erreur / le message de quota sous des clés différentes
 // selon le cas : "Note" (ancien format quota), "Information" (nouveau format,
 // quota ou fonction premium), "Error Message" (paramètre/symbole invalide).
-// On les regroupe pour ne plus jamais afficher un message générique trompeur.
 function alphaVantageErrorMessage(data) {
   return data?.Note || data?.Information || data?.["Error Message"] || null;
+}
+
+// ---------- Métaux précieux (or, argent) ----------
+// Alpha Vantage renvoie "Invalid API call" sur CURRENCY_EXCHANGE_RATE / FX_DAILY
+// pour XAU et XAG : ces symboles ne sont pas supportés sur le plan gratuit.
+// On les route donc vers gold-api.com : gratuit, sans clé API, CORS activé,
+// appelable directement depuis le navigateur. Limite : leur endpoint
+// d'historique nécessite une clé (10 req/h en gratuit), donc on affiche le
+// prix en temps réel mais pas de support/résistance pour ces deux actifs.
+const METAL_SYMBOLS = ["XAU", "XAG"];
+function isMetal(symbol) {
+  return METAL_SYMBOLS.includes(symbol.toUpperCase());
+}
+
+async function fetchMetalPrice(symbol) {
+  const res = await fetch(`https://api.gold-api.com/price/${encodeURIComponent(symbol.toUpperCase())}`);
+  if (!res.ok) throw new Error("Métal introuvable (XAU pour l'or, XAG pour l'argent)");
+  const data = await res.json();
+  if (typeof data.price !== "number") throw new Error("Prix du métal indisponible");
+  return { price: data.price, change24h: null };
 }
 
 // ---------- Helpers API ----------
@@ -89,7 +108,7 @@ async function fetchAlphaHistory(symbol) {
     .sort((a, b) => new Date(a.date) - new Date(b.date));
 }
 
-// Devises et métaux (or = XAU, argent = XAG), toujours cotés contre USD
+// Devises classiques uniquement (les métaux passent par fetchMetalPrice ci-dessus)
 async function fetchFxQuote(symbol) {
   const res = await fetch(`/api/stock?symbol=${encodeURIComponent(symbol)}&kind=quote&market=fx`);
   const data = await res.json();
@@ -97,7 +116,7 @@ async function fetchFxQuote(symbol) {
   const q = data["Realtime Currency Exchange Rate"];
   if (!q || !q["5. Exchange Rate"]) {
     const reason = alphaVantageErrorMessage(data);
-    throw new Error(reason || "Devise/métal introuvable (ex: EUR, GBP, XAU, XAG)");
+    throw new Error(reason || "Devise introuvable (ex: EUR, GBP)");
   }
   return { price: parseFloat(q["5. Exchange Rate"]), change24h: null };
 }
@@ -289,12 +308,19 @@ function PrixNiveaux({ prefill, setTab, setPrefillCalc }) {
         const { support, resistance } = supportResistance(history);
         setResult({ ...price, support, resistance, symbol: q.toUpperCase() });
       } else if (t === "fx") {
-        const [price, history] = await Promise.all([
-          fetchFxQuote(q.toUpperCase()),
-          fetchFxHistory(q.toUpperCase()),
-        ]);
-        const { support, resistance } = supportResistance(history);
-        setResult({ ...price, support, resistance, symbol: `${q.toUpperCase()}/USD` });
+        if (isMetal(q)) {
+          // Or / argent : prix temps réel via gold-api.com, pas d'historique
+          // gratuit disponible donc pas de support/résistance pour ces deux actifs.
+          const price = await fetchMetalPrice(q);
+          setResult({ ...price, support: null, resistance: null, symbol: `${q.toUpperCase()}/USD` });
+        } else {
+          const [price, history] = await Promise.all([
+            fetchFxQuote(q.toUpperCase()),
+            fetchFxHistory(q.toUpperCase()),
+          ]);
+          const { support, resistance } = supportResistance(history);
+          setResult({ ...price, support, resistance, symbol: `${q.toUpperCase()}/USD` });
+        }
       } else {
         const [price, history] = await Promise.all([
           fetchAlphaQuote(q.toUpperCase()),
@@ -383,19 +409,31 @@ function PrixNiveaux({ prefill, setTab, setPrefillCalc }) {
             <div style={{ fontSize: 15, fontWeight: 700 }}>{result.symbol}</div>
             <div style={{ fontSize: 22, fontWeight: 700 }}>${result.price.toLocaleString()}</div>
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
-            <div style={{ background: NAVY, borderRadius: 8, padding: 10 }}>
-              <div style={{ fontSize: 11, color: MUTED }}>Support (30j)</div>
-              <div style={{ fontSize: 15, fontWeight: 700, color: POS }}>${result.support.toFixed(2)}</div>
+
+          {result.support != null ? (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
+              <div style={{ background: NAVY, borderRadius: 8, padding: 10 }}>
+                <div style={{ fontSize: 11, color: MUTED }}>Support (30j)</div>
+                <div style={{ fontSize: 15, fontWeight: 700, color: POS }}>${result.support.toFixed(2)}</div>
+              </div>
+              <div style={{ background: NAVY, borderRadius: 8, padding: 10 }}>
+                <div style={{ fontSize: 11, color: MUTED }}>Résistance (30j)</div>
+                <div style={{ fontSize: 15, fontWeight: 700, color: NEG }}>${result.resistance.toFixed(2)}</div>
+              </div>
             </div>
-            <div style={{ background: NAVY, borderRadius: 8, padding: 10 }}>
-              <div style={{ fontSize: 11, color: MUTED }}>Résistance (30j)</div>
-              <div style={{ fontSize: 15, fontWeight: 700, color: NEG }}>${result.resistance.toFixed(2)}</div>
+          ) : (
+            <div style={{ fontSize: 12, color: MUTED, marginBottom: 12 }}>
+              Historique indisponible gratuitement pour l'or/l'argent — prix en temps réel uniquement.
             </div>
-          </div>
+          )}
+
           <button
             onClick={() => {
-              setPrefillCalc({ entry: result.price, stop: result.support });
+              setPrefillCalc(
+                result.support != null
+                  ? { entry: result.price, stop: result.support }
+                  : { entry: result.price }
+              );
               setTab("calc");
             }}
             style={{
@@ -445,10 +483,17 @@ function Dossier({ setTab, setPrefillCalc }) {
         ]);
       } else if (type === "fx") {
         const sym = query.toUpperCase();
-        [price, history] = await Promise.all([
-          fetchFxQuote(sym),
-          fetchFxHistory(sym),
-        ]);
+        if (isMetal(sym)) {
+          // Pas d'historique gratuit pour l'or/argent : on analyse sans les
+          // tendances de prix, seulement le sentiment des actualités.
+          price = await fetchMetalPrice(sym);
+          history = null;
+        } else {
+          [price, history] = await Promise.all([
+            fetchFxQuote(sym),
+            fetchFxHistory(sym),
+          ]);
+        }
       } else {
         const sym = query.toUpperCase();
         [price, history] = await Promise.all([
@@ -457,12 +502,14 @@ function Dossier({ setTab, setPrefillCalc }) {
         ]);
       }
 
-      const t7 = trendFromHistory(history, 7);
-      const t30 = trendFromHistory(history, 30);
-      const t90 = trendFromHistory(history, 90);
-      const { support, resistance } = supportResistance(
-        history.filter((h) => new Date(h.date).getTime() >= Date.now() - 30 * 86400000)
-      );
+      const t7 = history ? trendFromHistory(history, 7) : null;
+      const t30 = history ? trendFromHistory(history, 30) : null;
+      const t90 = history ? trendFromHistory(history, 90) : null;
+      const { support, resistance } = history
+        ? supportResistance(
+            history.filter((h) => new Date(h.date).getTime() >= Date.now() - 30 * 86400000)
+          )
+        : { support: null, resistance: null };
 
       let news = null;
       let newsError = "";
@@ -486,7 +533,9 @@ function Dossier({ setTab, setPrefillCalc }) {
         t7 && `Court terme (7j) : ${t7.direction} (${t7.pct > 0 ? "+" : ""}${t7.pct.toFixed(1)}%)`,
         t30 && `Moyen terme (30j) : ${t30.direction} (${t30.pct > 0 ? "+" : ""}${t30.pct.toFixed(1)}%)`,
         t90 && `Long terme (90j) : ${t90.direction} (${t90.pct > 0 ? "+" : ""}${t90.pct.toFixed(1)}%)`,
-        `Support 30j : $${support.toFixed(2)} — Résistance 30j : $${resistance.toFixed(2)}`,
+        support != null
+          ? `Support 30j : $${support.toFixed(2)} — Résistance 30j : $${resistance.toFixed(2)}`
+          : "Historique de prix indisponible gratuitement pour l'or/l'argent — analyse basée sur le prix actuel et les actualités uniquement",
         news
           ? `Actualités : ton ${news.label} sur ${news.articleCount} articles récents`
           : newsError
@@ -606,10 +655,14 @@ function Dossier({ setTab, setPrefillCalc }) {
 
           <button
             onClick={() => {
-              setPrefillCalc({
-                entry: dossier.price,
-                stop: dossier.verdict === "baissier" ? dossier.resistance : dossier.support,
-              });
+              setPrefillCalc(
+                dossier.support != null
+                  ? {
+                      entry: dossier.price,
+                      stop: dossier.verdict === "baissier" ? dossier.resistance : dossier.support,
+                    }
+                  : { entry: dossier.price }
+              );
               setTab("calc");
             }}
             style={{
