@@ -82,6 +82,35 @@ async function fetchAlphaHistory(symbol) {
     .sort((a, b) => new Date(a.date) - new Date(b.date));
 }
 
+// Devises et métaux (or = XAU, argent = XAG), toujours cotés contre USD
+async function fetchFxQuote(symbol) {
+  const res = await fetch(`/api/stock?symbol=${encodeURIComponent(symbol)}&kind=quote&market=fx`);
+  const data = await res.json();
+  if (data.error) throw new Error(data.error);
+  const q = data["Realtime Currency Exchange Rate"];
+  if (!q || !q["5. Exchange Rate"]) {
+    throw new Error(
+      data?.Note ? "Quota Alpha Vantage atteint (25/jour) — réessaie plus tard" : "Devise/métal introuvable (ex: EUR, GBP, XAU, XAG)"
+    );
+  }
+  return { price: parseFloat(q["5. Exchange Rate"]), change24h: null };
+}
+
+async function fetchFxHistory(symbol) {
+  const res = await fetch(`/api/stock?symbol=${encodeURIComponent(symbol)}&kind=history&market=fx`);
+  const data = await res.json();
+  if (data.error) throw new Error(data.error);
+  const series = data["Time Series FX (Daily)"];
+  if (!series) {
+    throw new Error(
+      data?.Note ? "Quota Alpha Vantage atteint (25/jour) — réessaie plus tard" : "Historique indisponible"
+    );
+  }
+  return Object.entries(series)
+    .map(([date, v]) => ({ date, close: parseFloat(v["4. close"]) }))
+    .sort((a, b) => new Date(a.date) - new Date(b.date));
+}
+
 async function fetchNewsSentiment(query) {
   const res = await fetch(`/api/news?q=${encodeURIComponent(query)}`);
   const data = await res.json();
@@ -144,6 +173,13 @@ function TrendBadge({ label, trend }) {
 }
 
 // ================= Scanner =================
+const FX_SHORTCUTS = [
+  { label: "Or (XAU)", type: "fx", query: "XAU" },
+  { label: "Argent (XAG)", type: "fx", query: "XAG" },
+  { label: "EUR/USD", type: "fx", query: "EUR" },
+  { label: "GBP/USD", type: "fx", query: "GBP" },
+];
+
 function Scanner({ onPick }) {
   const [coins, setCoins] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -158,6 +194,30 @@ function Scanner({ onPick }) {
 
   return (
     <div>
+      <div style={{ fontSize: 11, color: MUTED, marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.5 }}>
+        Or &amp; devises
+      </div>
+      <div style={{ display: "flex", gap: 6, marginBottom: 18, flexWrap: "wrap" }}>
+        {FX_SHORTCUTS.map((s) => (
+          <button
+            key={s.query}
+            onClick={() => onPick(s)}
+            style={{
+              padding: "8px 12px",
+              borderRadius: 20,
+              border: `1px solid ${LINE}`,
+              background: PANEL,
+              color: TEXT,
+              fontSize: 12,
+              fontWeight: 600,
+              cursor: "pointer",
+            }}
+          >
+            {s.label}
+          </button>
+        ))}
+      </div>
+
       <div style={{ fontSize: 13, color: MUTED, marginBottom: 14 }}>
         Top 10 crypto par capitalisation — clique un actif pour l'ouvrir dans Prix &amp; Niveaux.
       </div>
@@ -223,6 +283,13 @@ function PrixNiveaux({ prefill, setTab, setPrefillCalc }) {
         ]);
         const { support, resistance } = supportResistance(history);
         setResult({ ...price, support, resistance, symbol: q.toUpperCase() });
+      } else if (t === "fx") {
+        const [price, history] = await Promise.all([
+          fetchFxQuote(q.toUpperCase()),
+          fetchFxHistory(q.toUpperCase()),
+        ]);
+        const { support, resistance } = supportResistance(history);
+        setResult({ ...price, support, resistance, symbol: `${q.toUpperCase()}/USD` });
       } else {
         const [price, history] = await Promise.all([
           fetchAlphaQuote(q.toUpperCase()),
@@ -243,10 +310,16 @@ function PrixNiveaux({ prefill, setTab, setPrefillCalc }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prefill]);
 
+  const TYPES = [
+    { id: "crypto", label: "Crypto" },
+    { id: "stock", label: "Actions" },
+    { id: "fx", label: "Devises & Or" },
+  ];
+
   return (
     <div>
       <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-        {["crypto", "stock"].map((t) => (
+        {TYPES.map(({ id: t, label }) => (
           <button
             key={t}
             onClick={() => setType(t)}
@@ -262,7 +335,7 @@ function PrixNiveaux({ prefill, setTab, setPrefillCalc }) {
               cursor: "pointer",
             }}
           >
-            {t === "crypto" ? "Crypto" : "Action / Forex / Or"}
+            {label}
           </button>
         ))}
       </div>
@@ -277,7 +350,7 @@ function PrixNiveaux({ prefill, setTab, setPrefillCalc }) {
         <input
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder={type === "crypto" ? "ex: bitcoin" : "ex: TSLA"}
+          placeholder={type === "crypto" ? "ex: bitcoin" : type === "fx" ? "ex: XAU (or), EUR, GBP" : "ex: TSLA"}
           style={{
             flex: 1,
             background: NAVY,
@@ -365,6 +438,12 @@ function Dossier({ setTab, setPrefillCalc }) {
           fetchCoinGeckoPrice(id),
           fetchCoinGeckoHistory(id, 90),
         ]);
+      } else if (type === "fx") {
+        const sym = query.toUpperCase();
+        [price, history] = await Promise.all([
+          fetchFxQuote(sym),
+          fetchFxHistory(sym),
+        ]);
       } else {
         const sym = query.toUpperCase();
         [price, history] = await Promise.all([
@@ -435,7 +514,11 @@ function Dossier({ setTab, setPrefillCalc }) {
       </div>
 
       <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-        {["crypto", "stock"].map((t) => (
+        {[
+          { id: "crypto", label: "Crypto" },
+          { id: "stock", label: "Actions" },
+          { id: "fx", label: "Devises & Or" },
+        ].map(({ id: t, label }) => (
           <button
             key={t}
             onClick={() => setType(t)}
@@ -451,7 +534,7 @@ function Dossier({ setTab, setPrefillCalc }) {
               cursor: "pointer",
             }}
           >
-            {t === "crypto" ? "Crypto" : "Action / Forex / Or"}
+            {label}
           </button>
         ))}
       </div>
@@ -466,7 +549,7 @@ function Dossier({ setTab, setPrefillCalc }) {
         <input
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder={type === "crypto" ? "ex: bitcoin" : "ex: TSLA"}
+          placeholder={type === "crypto" ? "ex: bitcoin" : type === "fx" ? "ex: XAU (or), EUR, GBP" : "ex: TSLA"}
           style={{ flex: 1, background: NAVY, border: `1px solid ${LINE}`, borderRadius: 8, padding: "10px 12px", color: TEXT, fontSize: 14 }}
         />
         <button type="submit" style={{ background: ACCENT, border: "none", borderRadius: 8, padding: "0 14px", cursor: "pointer", color: "#fff", fontWeight: 600, fontSize: 13 }}>
