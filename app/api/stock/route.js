@@ -3,13 +3,16 @@
 //
 // market=equity (défaut) : actions, ex. symbol=TSLA
 // market=fx              : devises et métaux (or=XAU, argent=XAG), ex. symbol=EUR ou XAU, coté contre USD
-
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
   const symbol = searchParams.get("symbol");
   const kind = searchParams.get("kind"); // "quote" ou "history"
   const market = searchParams.get("market") || "equity";
-  const key = process.env.ALPHA_VANTAGE_KEY;
+
+  // .trim() : élimine un espace ou retour à la ligne invisible qui peut
+  // s'être glissé lors du copier-coller de la clé dans Vercel — cause
+  // fréquente d'un "Invalid API call" trompeur côté Alpha Vantage.
+  const key = process.env.ALPHA_VANTAGE_KEY?.trim();
 
   if (!symbol || !kind) {
     return Response.json({ error: "Paramètres manquants (symbol, kind)" }, { status: 400 });
@@ -20,7 +23,6 @@ export async function GET(request) {
       { status: 500 }
     );
   }
-
   let url;
   if (market === "fx") {
     url =
@@ -32,7 +34,6 @@ export async function GET(request) {
     const extra = kind === "history" ? "&outputsize=compact" : "";
     url = `https://www.alphavantage.co/query?function=${fn}&symbol=${encodeURIComponent(symbol)}&apikey=${key}${extra}`;
   }
-
   try {
     const res = await fetch(url);
     const data = await res.json();
