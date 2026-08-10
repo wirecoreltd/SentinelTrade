@@ -23,6 +23,15 @@ const LINE = "#232C3D";
 const POS = "#3DD68C";
 const NEG = "#FF6767";
 
+// ---------- Helper: extrait un message d'erreur exploitable d'une réponse Alpha Vantage ----------
+// Alpha Vantage renvoie l'erreur / le message de quota sous des clés différentes
+// selon le cas : "Note" (ancien format quota), "Information" (nouveau format,
+// quota ou fonction premium), "Error Message" (paramètre/symbole invalide).
+// On les regroupe pour ne plus jamais afficher un message générique trompeur.
+function alphaVantageErrorMessage(data) {
+  return data?.Note || data?.Information || data?.["Error Message"] || null;
+}
+
 // ---------- Helpers API ----------
 async function fetchCoinGeckoPrice(id) {
   const res = await fetch(
@@ -57,9 +66,8 @@ async function fetchAlphaQuote(symbol) {
   if (data.error) throw new Error(data.error);
   const q = data["Global Quote"];
   if (!q || !q["05. price"]) {
-    throw new Error(
-      data?.Note ? "Quota Alpha Vantage atteint (25/jour) — réessaie plus tard" : "Symbole introuvable"
-    );
+    const reason = alphaVantageErrorMessage(data);
+    throw new Error(reason || "Symbole introuvable");
   }
   return {
     price: parseFloat(q["05. price"]),
@@ -73,9 +81,8 @@ async function fetchAlphaHistory(symbol) {
   if (data.error) throw new Error(data.error);
   const series = data["Time Series (Daily)"];
   if (!series) {
-    throw new Error(
-      data?.Note ? "Quota Alpha Vantage atteint (25/jour) — réessaie plus tard" : "Historique indisponible"
-    );
+    const reason = alphaVantageErrorMessage(data);
+    throw new Error(reason || "Historique indisponible");
   }
   return Object.entries(series)
     .map(([date, v]) => ({ date, close: parseFloat(v["4. close"]) }))
@@ -89,9 +96,8 @@ async function fetchFxQuote(symbol) {
   if (data.error) throw new Error(data.error);
   const q = data["Realtime Currency Exchange Rate"];
   if (!q || !q["5. Exchange Rate"]) {
-    throw new Error(
-      data?.Note ? "Quota Alpha Vantage atteint (25/jour) — réessaie plus tard" : "Devise/métal introuvable (ex: EUR, GBP, XAU, XAG)"
-    );
+    const reason = alphaVantageErrorMessage(data);
+    throw new Error(reason || "Devise/métal introuvable (ex: EUR, GBP, XAU, XAG)");
   }
   return { price: parseFloat(q["5. Exchange Rate"]), change24h: null };
 }
@@ -102,9 +108,8 @@ async function fetchFxHistory(symbol) {
   if (data.error) throw new Error(data.error);
   const series = data["Time Series FX (Daily)"];
   if (!series) {
-    throw new Error(
-      data?.Note ? "Quota Alpha Vantage atteint (25/jour) — réessaie plus tard" : "Historique indisponible"
-    );
+    const reason = alphaVantageErrorMessage(data);
+    throw new Error(reason || "Historique indisponible");
   }
   return Object.entries(series)
     .map(([date, v]) => ({ date, close: parseFloat(v["4. close"]) }))
