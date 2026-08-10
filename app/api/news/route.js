@@ -1,15 +1,18 @@
-// Proxy vers NewsData.io — évite les soucis de CORS depuis le navigateur.
-// La clé reste fournie par l'utilisateur (stockée côté client), on la relaie simplement ici.
+// Proxy vers NewsData.io — la clé vient d'une variable d'environnement
+// côté serveur (NEWSDATA_KEY), jamais exposée au navigateur.
 
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
   const q = searchParams.get("q");
-  const apikey = searchParams.get("apikey");
+  const apikey = process.env.NEWSDATA_KEY;
 
-  if (!q || !apikey) {
+  if (!q) {
+    return Response.json({ error: "Paramètre manquant (q)" }, { status: 400 });
+  }
+  if (!apikey) {
     return Response.json(
-      { error: "Paramètres manquants (q, apikey)" },
-      { status: 400 }
+      { error: "Clé NewsData.io non configurée sur le serveur (variable NEWSDATA_KEY manquante sur Vercel)" },
+      { status: 500 }
     );
   }
 
@@ -30,9 +33,6 @@ export async function GET(request) {
 
     return Response.json(data);
   } catch (err) {
-    return Response.json(
-      { error: "Impossible de contacter NewsData.io" },
-      { status: 500 }
-    );
+    return Response.json({ error: "Impossible de contacter NewsData.io" }, { status: 500 });
   }
 }
