@@ -557,6 +557,23 @@ const LEVERAGE_PRESETS = {
   spot: { label: "Spot (Binance, sans levier)", leverage: 1 },
 };
 
+// Défini en dehors de Calculateur : sinon React recrée ce composant à
+// chaque frappe et l'input perd le focus après chaque caractère.
+function CalcField({ label, value, onChange, placeholder }) {
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <div style={{ fontSize: 12, color: MUTED, marginBottom: 4 }}>{label}</div>
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        inputMode="decimal"
+        style={{ width: "100%", background: NAVY, border: `1px solid ${LINE}`, borderRadius: 8, padding: "10px 12px", color: TEXT, fontSize: 14 }}
+      />
+    </div>
+  );
+}
+
 function Calculateur({ prefill }) {
   const [assetType, setAssetType] = useState("crypto");
   const [invested, setInvested] = useState("50");
@@ -583,24 +600,14 @@ function Calculateur({ prefill }) {
 
   const valid = inv > 0 && lev > 0 && e > 0 && s > 0 && e !== s;
   const positionValue = valid ? inv * lev : null; // taille totale de la position en €
-  const quantity = valid ? positionValue / e : null; // à saisir dans le champ "Quantité" du broker
-  const distance = valid ? Math.abs(e - s) : null;
+  const quantity = valid ? positionValue / e : null; // à saisir dans le champ "Taille"/"Quantité" du broker
+  const distance = valid ? Math.abs(e - s) : null; // "Distance" du stop, comme sur Capital.com
+  const distancePct = valid ? (distance / e) * 100 : null; // "Distance (%)"
   const lossAmount = valid ? quantity * distance : null;
   const lossPctOfInvested = valid ? (lossAmount / inv) * 100 : null;
   const gainAmount = valid && tp > 0 ? quantity * Math.abs(tp - e) : null;
-
-  const Field = ({ label, value, onChange, placeholder }) => (
-    <div style={{ marginBottom: 12 }}>
-      <div style={{ fontSize: 12, color: MUTED, marginBottom: 4 }}>{label}</div>
-      <input
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-        inputMode="decimal"
-        style={{ width: "100%", background: NAVY, border: `1px solid ${LINE}`, borderRadius: 8, padding: "10px 12px", color: TEXT, fontSize: 14 }}
-      />
-    </div>
-  );
+  const gainDistance = valid && tp > 0 ? Math.abs(tp - e) : null;
+  const gainDistancePct = valid && tp > 0 ? (gainDistance / e) * 100 : null;
 
   return (
     <div>
@@ -626,11 +633,11 @@ function Calculateur({ prefill }) {
         ))}
       </div>
 
-      <Field label="Montant à investir — ta mise / marge (€)" value={invested} onChange={setInvested} placeholder="ex: 50" />
-      <Field label="Levier (x1 = sans levier, ex: Binance spot)" value={leverage} onChange={setLeverage} placeholder="ex: 2" />
-      <Field label="Prix d'entrée" value={entry} onChange={setEntry} placeholder="ex: 4346.55" />
-      <Field label="Stop-loss" value={stop} onChange={setStop} placeholder="ex: 4300.00" />
-      <Field label="Take-profit (optionnel)" value={takeProfit} onChange={setTakeProfit} placeholder="ex: 4420.00" />
+      <CalcField label="Montant à investir — ta mise / marge (€)" value={invested} onChange={setInvested} placeholder="ex: 50" />
+      <CalcField label="Levier (x1 = sans levier, ex: Binance spot)" value={leverage} onChange={setLeverage} placeholder="ex: 2" />
+      <CalcField label="Prix d'entrée" value={entry} onChange={setEntry} placeholder="ex: 4346.55" />
+      <CalcField label="Stop-loss" value={stop} onChange={setStop} placeholder="ex: 4300.00" />
+      <CalcField label="Take-profit (optionnel)" value={takeProfit} onChange={setTakeProfit} placeholder="ex: 4420.00" />
 
       {valid ? (
         <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 16, marginTop: 8 }}>
@@ -639,24 +646,42 @@ function Calculateur({ prefill }) {
               À saisir sur Capital.com / Binance
             </div>
             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-              <span style={{ fontSize: 13, color: MUTED }}>Quantité</span>
+              <span style={{ fontSize: 13, color: MUTED }}>Taille</span>
               <span style={{ fontSize: 16, fontWeight: 700, color: ACCENT }}>{quantity.toFixed(6)}</span>
             </div>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-              <span style={{ fontSize: 13, color: MUTED }}>Stop-loss</span>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}>
+              <span style={{ fontSize: 13, color: MUTED }}>Stop loss — Niveau de prix</span>
               <span style={{ fontSize: 14, fontWeight: 700 }}>{s}</span>
             </div>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+              <span style={{ fontSize: 11, color: MUTED }}>Distance</span>
+              <span style={{ fontSize: 12, color: MUTED }}>
+                {distance.toFixed(2)} ({distancePct.toFixed(2)}%)
+              </span>
+            </div>
             {tp > 0 && (
-              <div style={{ display: "flex", justifyContent: "space-between" }}>
-                <span style={{ fontSize: 13, color: MUTED }}>Take-profit</span>
-                <span style={{ fontSize: 14, fontWeight: 700 }}>{tp}</span>
-              </div>
+              <>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}>
+                  <span style={{ fontSize: 13, color: MUTED }}>Take-profit — Niveau de prix</span>
+                  <span style={{ fontSize: 14, fontWeight: 700 }}>{tp}</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <span style={{ fontSize: 11, color: MUTED }}>Distance</span>
+                  <span style={{ fontSize: 12, color: MUTED }}>
+                    {gainDistance.toFixed(2)} ({gainDistancePct.toFixed(2)}%)
+                  </span>
+                </div>
+              </>
             )}
           </div>
 
           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
             <span style={{ fontSize: 13, color: MUTED }}>Taille totale de la position</span>
             <span style={{ fontSize: 14, fontWeight: 700 }}>{positionValue.toFixed(2)} €</span>
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+            <span style={{ fontSize: 13, color: MUTED }}>Marge requise</span>
+            <span style={{ fontSize: 14, fontWeight: 700 }}>{inv.toFixed(2)} €</span>
           </div>
           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
             <span style={{ fontSize: 13, color: MUTED }}>Perte si stop touché</span>
