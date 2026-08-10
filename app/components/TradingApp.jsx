@@ -11,9 +11,6 @@ import {
   TrendingDown,
   Minus,
   Send,
-  Settings,
-  ChevronDown,
-  ChevronUp,
 } from "lucide-react";
 
 // ---------- Thème ----------
@@ -54,11 +51,10 @@ async function fetchCoinGeckoTop(n = 10) {
   return res.json();
 }
 
-async function fetchAlphaQuote(symbol, key) {
-  const res = await fetch(
-    `https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=${symbol}&apikey=${key}`
-  );
+async function fetchAlphaQuote(symbol) {
+  const res = await fetch(`/api/stock?symbol=${encodeURIComponent(symbol)}&kind=quote`);
   const data = await res.json();
+  if (data.error) throw new Error(data.error);
   const q = data["Global Quote"];
   if (!q || !q["05. price"]) {
     throw new Error(
@@ -71,11 +67,10 @@ async function fetchAlphaQuote(symbol, key) {
   };
 }
 
-async function fetchAlphaHistory(symbol, key) {
-  const res = await fetch(
-    `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol=${symbol}&apikey=${key}&outputsize=compact`
-  );
+async function fetchAlphaHistory(symbol) {
+  const res = await fetch(`/api/stock?symbol=${encodeURIComponent(symbol)}&kind=history`);
   const data = await res.json();
+  if (data.error) throw new Error(data.error);
   const series = data["Time Series (Daily)"];
   if (!series) {
     throw new Error(
@@ -87,10 +82,8 @@ async function fetchAlphaHistory(symbol, key) {
     .sort((a, b) => new Date(a.date) - new Date(b.date));
 }
 
-async function fetchNewsSentiment(query, key) {
-  const res = await fetch(
-    `/api/news?q=${encodeURIComponent(query)}&apikey=${encodeURIComponent(key)}`
-  );
+async function fetchNewsSentiment(query) {
+  const res = await fetch(`/api/news?q=${encodeURIComponent(query)}`);
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || "Actualités indisponibles");
   const articles = (data.results || []).slice(0, 15);
@@ -210,7 +203,7 @@ function Scanner({ onPick }) {
 }
 
 // ================= Prix & Niveaux =================
-function PrixNiveaux({ prefill, alphaKey, setTab, setPrefillCalc }) {
+function PrixNiveaux({ prefill, setTab, setPrefillCalc }) {
   const [type, setType] = useState(prefill?.type || "crypto");
   const [query, setQuery] = useState(prefill?.query || "");
   const [result, setResult] = useState(null);
@@ -231,10 +224,9 @@ function PrixNiveaux({ prefill, alphaKey, setTab, setPrefillCalc }) {
         const { support, resistance } = supportResistance(history);
         setResult({ ...price, support, resistance, symbol: q.toUpperCase() });
       } else {
-        if (!alphaKey) throw new Error("Colle ta clé Alpha Vantage ci-dessus (⚙️ Paramètres)");
         const [price, history] = await Promise.all([
-          fetchAlphaQuote(q.toUpperCase(), alphaKey),
-          fetchAlphaHistory(q.toUpperCase(), alphaKey),
+          fetchAlphaQuote(q.toUpperCase()),
+          fetchAlphaHistory(q.toUpperCase()),
         ]);
         const { support, resistance } = supportResistance(history);
         setResult({ ...price, support, resistance, symbol: q.toUpperCase() });
@@ -244,7 +236,7 @@ function PrixNiveaux({ prefill, alphaKey, setTab, setPrefillCalc }) {
     } finally {
       setLoading(false);
     }
-  }, [alphaKey]);
+  }, []);
 
   useEffect(() => {
     if (prefill?.query) runSearch(prefill.type, prefill.query);
@@ -353,7 +345,7 @@ function PrixNiveaux({ prefill, alphaKey, setTab, setPrefillCalc }) {
 }
 
 // ================= Dossier d'analyse =================
-function Dossier({ alphaKey, newsKey, setTab, setPrefillCalc }) {
+function Dossier({ setTab, setPrefillCalc }) {
   const [type, setType] = useState("crypto");
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(false);
@@ -374,11 +366,10 @@ function Dossier({ alphaKey, newsKey, setTab, setPrefillCalc }) {
           fetchCoinGeckoHistory(id, 90),
         ]);
       } else {
-        if (!alphaKey) throw new Error("Colle ta clé Alpha Vantage ci-dessus (⚙️ Paramètres)");
         const sym = query.toUpperCase();
         [price, history] = await Promise.all([
-          fetchAlphaQuote(sym, alphaKey),
-          fetchAlphaHistory(sym, alphaKey),
+          fetchAlphaQuote(sym),
+          fetchAlphaHistory(sym),
         ]);
       }
 
@@ -391,12 +382,10 @@ function Dossier({ alphaKey, newsKey, setTab, setPrefillCalc }) {
 
       let news = null;
       let newsError = "";
-      if (newsKey) {
-        try {
-          news = await fetchNewsSentiment(query, newsKey);
-        } catch (e) {
-          newsError = e.message;
-        }
+      try {
+        news = await fetchNewsSentiment(query);
+      } catch (e) {
+        newsError = e.message;
       }
 
       const trends = [t7, t30, t90].filter(Boolean);
@@ -418,7 +407,7 @@ function Dossier({ alphaKey, newsKey, setTab, setPrefillCalc }) {
           ? `Actualités : ton ${news.label} sur ${news.articleCount} articles récents`
           : newsError
           ? `Actualités indisponibles : ${newsError}`
-          : "Actualités non incluses (clé NewsData.io non renseignée)",
+          : "Actualités non incluses",
       ].filter(Boolean);
 
       setDossier({
@@ -560,26 +549,45 @@ function Dossier({ alphaKey, newsKey, setTab, setPrefillCalc }) {
 }
 
 // ================= Calculateur =================
+const LEVERAGE_PRESETS = {
+  crypto: { label: "Crypto (CFD)", leverage: 2 },
+  forex: { label: "Forex", leverage: 30 },
+  actions: { label: "Actions", leverage: 5 },
+  matieres: { label: "Matières premières / Or", leverage: 20 },
+  spot: { label: "Spot (Binance, sans levier)", leverage: 1 },
+};
+
 function Calculateur({ prefill }) {
-  const [balance, setBalance] = useState("");
-  const [riskPct, setRiskPct] = useState("1");
+  const [assetType, setAssetType] = useState("crypto");
+  const [invested, setInvested] = useState("50");
+  const [leverage, setLeverage] = useState(LEVERAGE_PRESETS.crypto.leverage.toString());
   const [entry, setEntry] = useState(prefill?.entry?.toString() || "");
   const [stop, setStop] = useState(prefill?.stop?.toString() || "");
+  const [takeProfit, setTakeProfit] = useState("");
 
   useEffect(() => {
     if (prefill?.entry) setEntry(prefill.entry.toString());
     if (prefill?.stop) setStop(prefill.stop.toString());
   }, [prefill]);
 
-  const b = parseFloat(balance);
-  const r = parseFloat(riskPct);
+  const onAssetType = (t) => {
+    setAssetType(t);
+    setLeverage(LEVERAGE_PRESETS[t].leverage.toString());
+  };
+
+  const inv = parseFloat(invested);
+  const lev = parseFloat(leverage);
   const e = parseFloat(entry);
   const s = parseFloat(stop);
+  const tp = parseFloat(takeProfit);
 
-  const valid = b > 0 && r > 0 && e > 0 && s > 0 && e !== s;
-  const riskAmount = valid ? (b * r) / 100 : null;
+  const valid = inv > 0 && lev > 0 && e > 0 && s > 0 && e !== s;
+  const positionValue = valid ? inv * lev : null; // taille totale de la position en €
+  const quantity = valid ? positionValue / e : null; // à saisir dans le champ "Quantité" du broker
   const distance = valid ? Math.abs(e - s) : null;
-  const positionSize = valid ? riskAmount / distance : null;
+  const lossAmount = valid ? quantity * distance : null;
+  const lossPctOfInvested = valid ? (lossAmount / inv) * 100 : null;
+  const gainAmount = valid && tp > 0 ? quantity * Math.abs(tp - e) : null;
 
   const Field = ({ label, value, onChange, placeholder }) => (
     <div style={{ marginBottom: 12 }}>
@@ -596,81 +604,80 @@ function Calculateur({ prefill }) {
 
   return (
     <div>
-      <Field label="Capital du compte ($)" value={balance} onChange={setBalance} placeholder="ex: 5000" />
-      <Field label="Risque par trade (%)" value={riskPct} onChange={setRiskPct} placeholder="ex: 1" />
-      <Field label="Prix d'entrée ($)" value={entry} onChange={setEntry} placeholder="ex: 4346.55" />
-      <Field label="Stop-loss ($)" value={stop} onChange={setStop} placeholder="ex: 4300.00" />
+      <div style={{ fontSize: 12, color: MUTED, marginBottom: 6 }}>Type d'actif (fixe le levier par défaut)</div>
+      <div style={{ display: "flex", gap: 6, marginBottom: 14, flexWrap: "wrap" }}>
+        {Object.entries(LEVERAGE_PRESETS).map(([key, v]) => (
+          <button
+            key={key}
+            onClick={() => onAssetType(key)}
+            style={{
+              padding: "6px 10px",
+              borderRadius: 20,
+              border: `1px solid ${assetType === key ? ACCENT : LINE}`,
+              background: assetType === key ? "rgba(79,140,255,0.12)" : "transparent",
+              color: assetType === key ? ACCENT : MUTED,
+              fontSize: 12,
+              fontWeight: 600,
+              cursor: "pointer",
+            }}
+          >
+            {v.label}
+          </button>
+        ))}
+      </div>
+
+      <Field label="Montant à investir — ta mise / marge (€)" value={invested} onChange={setInvested} placeholder="ex: 50" />
+      <Field label="Levier (x1 = sans levier, ex: Binance spot)" value={leverage} onChange={setLeverage} placeholder="ex: 2" />
+      <Field label="Prix d'entrée" value={entry} onChange={setEntry} placeholder="ex: 4346.55" />
+      <Field label="Stop-loss" value={stop} onChange={setStop} placeholder="ex: 4300.00" />
+      <Field label="Take-profit (optionnel)" value={takeProfit} onChange={setTakeProfit} placeholder="ex: 4420.00" />
 
       {valid ? (
         <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 16, marginTop: 8 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
-            <span style={{ fontSize: 13, color: MUTED }}>Montant risqué</span>
-            <span style={{ fontSize: 14, fontWeight: 700 }}>${riskAmount.toFixed(2)}</span>
+          <div style={{ marginBottom: 12, paddingBottom: 12, borderBottom: `1px solid ${LINE}` }}>
+            <div style={{ fontSize: 12, color: ACCENT, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 6 }}>
+              À saisir sur Capital.com / Binance
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+              <span style={{ fontSize: 13, color: MUTED }}>Quantité</span>
+              <span style={{ fontSize: 16, fontWeight: 700, color: ACCENT }}>{quantity.toFixed(6)}</span>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+              <span style={{ fontSize: 13, color: MUTED }}>Stop-loss</span>
+              <span style={{ fontSize: 14, fontWeight: 700 }}>{s}</span>
+            </div>
+            {tp > 0 && (
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <span style={{ fontSize: 13, color: MUTED }}>Take-profit</span>
+                <span style={{ fontSize: 14, fontWeight: 700 }}>{tp}</span>
+              </div>
+            )}
           </div>
-          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
-            <span style={{ fontSize: 13, color: MUTED }}>Distance au stop</span>
-            <span style={{ fontSize: 14, fontWeight: 700 }}>${distance.toFixed(2)}</span>
+
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+            <span style={{ fontSize: 13, color: MUTED }}>Taille totale de la position</span>
+            <span style={{ fontSize: 14, fontWeight: 700 }}>{positionValue.toFixed(2)} €</span>
           </div>
-          <div style={{ display: "flex", justifyContent: "space-between", paddingTop: 10, borderTop: `1px solid ${LINE}` }}>
-            <span style={{ fontSize: 13, color: ACCENT, fontWeight: 600 }}>Taille de position</span>
-            <span style={{ fontSize: 18, fontWeight: 700, color: ACCENT }}>{positionSize.toFixed(4)} unités</span>
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+            <span style={{ fontSize: 13, color: MUTED }}>Perte si stop touché</span>
+            <span style={{ fontSize: 14, fontWeight: 700, color: NEG }}>
+              -{lossAmount.toFixed(2)} € ({lossPctOfInvested.toFixed(0)}% de ta mise)
+            </span>
           </div>
+          {gainAmount !== null && (
+            <div style={{ display: "flex", justifyContent: "space-between" }}>
+              <span style={{ fontSize: 13, color: MUTED }}>Gain si take-profit touché</span>
+              <span style={{ fontSize: 14, fontWeight: 700, color: POS }}>+{gainAmount.toFixed(2)} €</span>
+            </div>
+          )}
+          {lossPctOfInvested > 100 && (
+            <div style={{ fontSize: 11, color: NEG, marginTop: 10 }}>
+              ⚠️ La perte potentielle dépasse ta mise de départ — avec ce levier, ta position peut être liquidée avant que le stop ne soit atteint. Réduis le levier ou resserre le stop.
+            </div>
+          )}
         </div>
       ) : (
-        <div style={{ fontSize: 12, color: MUTED, marginTop: 8 }}>Remplis les 4 champs pour voir le calcul.</div>
-      )}
-    </div>
-  );
-}
-
-// ================= Paramètres (clés API) =================
-function Parametres({ alphaKey, setAlphaKey, newsKey, setNewsKey }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <div style={{ marginBottom: 16, border: `1px solid ${LINE}`, borderRadius: 10, overflow: "hidden" }}>
-      <button
-        onClick={() => setOpen(!open)}
-        style={{
-          width: "100%",
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          background: PANEL,
-          border: "none",
-          padding: "10px 12px",
-          color: TEXT,
-          cursor: "pointer",
-        }}
-      >
-        <span style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 600 }}>
-          <Settings size={14} /> Paramètres (clés API)
-        </span>
-        {open ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-      </button>
-      {open && (
-        <div style={{ padding: 12, background: NAVY }}>
-          <div style={{ fontSize: 12, color: MUTED, marginBottom: 4 }}>
-            Clé Alpha Vantage (actions/forex/or) — alphavantage.co/support/#api-key
-          </div>
-          <input
-            value={alphaKey}
-            onChange={(e) => setAlphaKey(e.target.value)}
-            placeholder="Colle ta clé ici"
-            style={{ width: "100%", background: PANEL, border: `1px solid ${LINE}`, borderRadius: 8, padding: "9px 10px", color: TEXT, fontSize: 13, marginBottom: 10 }}
-          />
-          <div style={{ fontSize: 12, color: MUTED, marginBottom: 4 }}>
-            Clé NewsData.io (sentiment actus) — newsdata.io/register
-          </div>
-          <input
-            value={newsKey}
-            onChange={(e) => setNewsKey(e.target.value)}
-            placeholder="Colle ta clé ici (optionnel)"
-            style={{ width: "100%", background: PANEL, border: `1px solid ${LINE}`, borderRadius: 8, padding: "9px 10px", color: TEXT, fontSize: 13 }}
-          />
-          <div style={{ fontSize: 11, color: MUTED, marginTop: 8 }}>
-            Les clés sont sauvegardées uniquement dans ton navigateur (localStorage), jamais envoyées ailleurs qu'aux fournisseurs concernés.
-          </div>
-        </div>
+        <div style={{ fontSize: 12, color: MUTED, marginTop: 8 }}>Remplis montant, levier, entrée et stop-loss pour voir le calcul.</div>
       )}
     </div>
   );
@@ -681,19 +688,6 @@ export default function TradingApp() {
   const [tab, setTab] = useState("scan");
   const [prefillPrix, setPrefillPrix] = useState(null);
   const [prefillCalc, setPrefillCalc] = useState(null);
-  const [alphaKey, setAlphaKey] = useState("");
-  const [newsKey, setNewsKey] = useState("");
-
-  useEffect(() => {
-    setAlphaKey(localStorage.getItem("alphaKey") || "");
-    setNewsKey(localStorage.getItem("newsKey") || "");
-  }, []);
-  useEffect(() => {
-    localStorage.setItem("alphaKey", alphaKey);
-  }, [alphaKey]);
-  useEffect(() => {
-    localStorage.setItem("newsKey", newsKey);
-  }, [newsKey]);
 
   const tabs = [
     { id: "scan", label: "Scanner", icon: Search },
@@ -716,8 +710,6 @@ export default function TradingApp() {
           </div>
           <div style={{ fontSize: 24, fontWeight: 700 }}>Scanner, analyse &amp; calculateur</div>
         </div>
-
-        <Parametres alphaKey={alphaKey} setAlphaKey={setAlphaKey} newsKey={newsKey} setNewsKey={setNewsKey} />
 
         <div style={{ display: "flex", gap: 4, marginBottom: 20, borderBottom: `1px solid ${LINE}`, paddingBottom: 4, flexWrap: "wrap" }}>
           {tabs.map(({ id, label, icon: Icon }) => (
@@ -752,10 +744,10 @@ export default function TradingApp() {
           />
         )}
         {tab === "prix" && (
-          <PrixNiveaux prefill={prefillPrix} alphaKey={alphaKey} setTab={setTab} setPrefillCalc={setPrefillCalc} />
+          <PrixNiveaux prefill={prefillPrix} setTab={setTab} setPrefillCalc={setPrefillCalc} />
         )}
         {tab === "dossier" && (
-          <Dossier alphaKey={alphaKey} newsKey={newsKey} setTab={setTab} setPrefillCalc={setPrefillCalc} />
+          <Dossier setTab={setTab} setPrefillCalc={setPrefillCalc} />
         )}
         {tab === "calc" && <Calculateur prefill={prefillCalc} />}
       </div>
