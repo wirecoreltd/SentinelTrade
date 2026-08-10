@@ -287,6 +287,30 @@ function Scanner({ onPick }) {
   );
 }
 
+function MiniChart({ history }) {
+  if (!history || history.length < 2) return null;
+  const closes = history.map((h) => h.close);
+  const min = Math.min(...closes);
+  const max = Math.max(...closes);
+  const range = max - min || 1;
+  const w = 300, h = 90, pad = 4;
+  const points = closes
+    .map((c, i) => {
+      const x = pad + (i / (closes.length - 1)) * (w - pad * 2);
+      const y = pad + (1 - (c - min) / range) * (h - pad * 2);
+      return `${x},${y}`;
+    })
+    .join(" ");
+  const trendUp = closes[closes.length - 1] >= closes[0];
+  return (
+    <div style={{ marginTop: 14, background: NAVY, border: `1px solid ${LINE}`, borderRadius: 8, padding: 10 }}>
+      <div style={{ fontSize: 11, color: MUTED, marginBottom: 6 }}>Évolution (30j)</div>
+      <svg viewBox={`0 0 ${w} ${h}`} width="100%" height={h} preserveAspectRatio="none">
+        <polyline points={points} fill="none" stroke={trendUp ? POS : NEG} strokeWidth="2" />
+      </svg>
+    </div>
+  );
+}
 // ================= Prix & Niveaux =================
 function PrixNiveaux({ prefill, setTab, setPrefillCalc }) {
   const [type, setType] = useState(prefill?.type || "crypto");
@@ -307,7 +331,7 @@ function PrixNiveaux({ prefill, setTab, setPrefillCalc }) {
           fetchCoinGeckoHistory(q.toLowerCase(), 30),
         ]);
         const { support, resistance } = supportResistance(history);
-        setResult({ ...price, support, resistance, symbol: q.toUpperCase() });
+        setResult({ ...price, support, resistance, symbol: q.toUpperCase(), history });
       } else if (t === "fx") {
         if (isMetal(q)) {
           // Or / argent : prix temps réel via gold-api.com, pas d'historique
@@ -455,6 +479,7 @@ function PrixNiveaux({ prefill, setTab, setPrefillCalc }) {
           >
             <Send size={13} /> Envoyer au calculateur
           </button>
+          <MiniChart history={result.history} />
         </div>
       )}
     </div>
@@ -837,16 +862,16 @@ function Calculateur({ prefill }) {
   const [invested, setInvested] = useState("50");
   const [leverage, setLeverage] = useState(LEVERAGE_PRESETS.crypto.leverage.toString());
   const [entry, setEntry] = useState(prefill?.entry?.toString() || "");
-  const [mode, setMode] = useState("auto"); // "auto" = % de la mise, "manuel" = prix exact
+  const [mode, setMode] = useState(prefill ? "auto" : "manuel");
   const [lossPct, setLossPct] = useState("15");
   const [gainPct, setGainPct] = useState("30");
   const [stopManual, setStopManual] = useState(prefill?.stop?.toString() || "");
   const [takeProfitManual, setTakeProfitManual] = useState("");
 
   useEffect(() => {
-    if (prefill?.entry) setEntry(prefill.entry.toString());
-    if (prefill?.stop) { setStopManual(prefill.stop.toString()); setMode("manuel"); }
-  }, [prefill]);
+  if (prefill?.entry) setEntry(prefill.entry.toString());
+  if (prefill?.stop) setStopManual(prefill.stop.toString());
+}, [prefill]);
 
   const onAssetType = (t) => {
     setAssetType(t);
@@ -1014,8 +1039,7 @@ export default function TradingApp() {
   const tabs = [
   { id: "scan", label: "Scanner", icon: Search },
   { id: "top15", label: "Top 15", icon: ListOrdered },
-  { id: "prix", label: "Prix & Niveaux", icon: LineChart },
-  { id: "dossier", label: "Dossier", icon: FileText },
+  { id: "prix", label: "Prix & Niveaux", icon: LineChart }, 
   { id: "calc", label: "Calculateur", icon: Calculator },
 ];
 
@@ -1077,9 +1101,7 @@ export default function TradingApp() {
         {tab === "prix" && (
           <PrixNiveaux prefill={prefillPrix} setTab={setTab} setPrefillCalc={setPrefillCalc} />
         )}
-        {tab === "dossier" && (
-          <Dossier setTab={setTab} setPrefillCalc={setPrefillCalc} />
-        )}
+       
         {tab === "calc" && <Calculateur prefill={prefillCalc} />}
       </div>
     </div>
