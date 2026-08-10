@@ -714,6 +714,11 @@ function Top15({ onPick }) {
   const [step, setStep] = useState("");
   const [error, setError] = useState("");
 
+  useEffect(() => {
+  runScan();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, []);
+
   const runScan = async () => {
     setLoading(true);
     setError("");
@@ -962,7 +967,7 @@ function Calculateur({ prefill }) {
 
 // ================= App =================
 export default function TradingApp() {
-  const [tab, setTab] = useState("scan");
+  const [tab, setTab] = useState("top15");
   const [prefillPrix, setPrefillPrix] = useState(null);
   const [prefillCalc, setPrefillCalc] = useState(null);
 
