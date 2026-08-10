@@ -55,7 +55,7 @@ async function fetchMetalPrice(symbol) {
 // ---------- Helpers API ----------
 async function fetchCoinGeckoPrice(id) {
   const res = await fetch(
-    `https://api.coingecko.com/api/v3/simple/price?ids=${id}&vs_currencies=usd&include_24hr_change=true`
+    `/api/crypto?path=simple/price&ids=${id}&vs_currencies=usd&include_24hr_change=true`
   );
   if (!res.ok) throw new Error("Identifiant crypto introuvable");
   const data = await res.json();
@@ -65,7 +65,7 @@ async function fetchCoinGeckoPrice(id) {
 
 async function fetchCoinGeckoHistory(id, days) {
   const res = await fetch(
-    `https://api.coingecko.com/api/v3/coins/${id}/market_chart?vs_currency=usd&days=${days}&interval=daily`
+    `/api/crypto?path=coins/${id}/market_chart&vs_currency=usd&days=${days}&interval=daily`
   );
   if (!res.ok) throw new Error("Historique crypto indisponible");
   const data = await res.json();
@@ -74,7 +74,7 @@ async function fetchCoinGeckoHistory(id, days) {
 
 async function fetchCoinGeckoTop(n = 10) {
   const res = await fetch(
-    `https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=${n}&page=1&price_change_percentage=24h`
+    `/api/crypto?path=coins/markets&vs_currency=usd&order=market_cap_desc&per_page=${n}&page=1&price_change_percentage=24h`
   );
   if (!res.ok) throw new Error("Scanner indisponible");
   return res.json();
