@@ -11,6 +11,7 @@ import {
   TrendingDown,
   Minus,
   Send,
+  ListOrdered,
 } from "lucide-react";
 
 // ---------- Thème ----------
@@ -689,6 +690,116 @@ function Dossier({ setTab, setPrefillCalc }) {
   );
 }
 
+// ================= Top 15 =================
+const FX_SCAN = ["EUR", "GBP", "JPY", "CHF", "CAD"];
+
+function verdictFromHistory(history) {
+  if (!history) return { verdict: "—", score: 0 };
+  const t7 = trendFromHistory(history, 7);
+  const t30 = trendFromHistory(history, 30);
+  const t90 = trendFromHistory(history, 90);
+  const trends = [t7, t30, t90].filter(Boolean);
+  const bull = trends.filter((t) => t.direction === "haussier").length;
+  const bear = trends.filter((t) => t.direction === "baissier").length;
+  const score = bull - bear;
+  let verdict = "mitigé";
+  if (score >= 2) verdict = "haussier";
+  else if (score <= -2) verdict = "baissier";
+  return { verdict, score: Math.abs(score) };
+}
+
+function Top15({ onPick }) {
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [step, setStep] = useState("");
+  const [error, setError] = useState("");
+
+  const runScan = async () => {
+    setLoading(true);
+    setError("");
+    const results = [];
+
+    try {
+      setStep("Cryptos…");
+      const top = await fetchCoinGeckoTop(8);
+      for (const c of top) {
+        try {
+          const history = await fetchCoinGeckoHistory(c.id, 90);
+          const { verdict, score } = verdictFromHistory(history);
+          results.push({ type: "crypto", query: c.id, name: c.symbol.toUpperCase(), price: c.current_price, verdict, score });
+        } catch {}
+      }
+    } catch {
+      setError("Cryptos indisponibles pour l'instant.");
+    }
+
+    setStep("Or et argent…");
+    for (const [sym, label] of [["XAU", "Or"], ["XAG", "Argent"]]) {
+      try {
+        const p = await fetchMetalPrice(sym);
+        results.push({ type: "fx", query: sym, name: label, price: p.price, verdict: "—", score: 0 });
+      } catch {}
+    }
+
+    for (const sym of FX_SCAN) {
+      setStep(`${sym}/USD…`);
+      try {
+        const [p, history] = await Promise.all([fetchFxQuote(sym), fetchFxHistory(sym)]);
+        const { verdict, score } = verdictFromHistory(history);
+        results.push({ type: "fx", query: sym, name: `${sym}/USD`, price: p.price, verdict, score });
+        await new Promise((r) => setTimeout(r, 800));
+      } catch {}
+    }
+
+    results.sort((a, b) => b.score - a.score);
+    setRows(results);
+    setStep("");
+    setLoading(false);
+    if (results.length === 0) setError("Aucune donnée récupérée — réessaie dans un instant.");
+  };
+
+  const verdictColor = (v) => (v === "haussier" ? POS : v === "baissier" ? NEG : MUTED);
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+        <div style={{ fontSize: 13, color: MUTED, maxWidth: 260, lineHeight: 1.5 }}>
+          Classement par force du signal technique (7j/30j/90j) — pas un conseil d'achat.
+        </div>
+        <button
+          onClick={runScan}
+          disabled={loading}
+          style={{ display: "flex", alignItems: "center", gap: 6, background: ACCENT, border: "none", borderRadius: 8, padding: "9px 14px", color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer", flexShrink: 0 }}
+        >
+          {loading ? <Loader2 className="spin" size={14} /> : <ListOrdered size={14} />}
+          {loading ? step || "Scan…" : "Scanner"}
+        </button>
+      </div>
+
+      {error && <div style={{ color: NEG, fontSize: 13, marginBottom: 10 }}>{error}</div>}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {rows.map((r, i) => (
+          <button
+            key={r.type + r.query + i}
+            onClick={() => onPick({ type: r.type, query: r.query })}
+            style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: "12px 14px", cursor: "pointer", color: TEXT, textAlign: "left" }}
+          >
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 14 }}>{r.name}</div>
+              <div style={{ fontSize: 11, color: MUTED }}>{r.type === "fx" ? "Devise / métal" : "Crypto"}</div>
+            </div>
+            <div style={{ textAlign: "right" }}>
+              <div style={{ fontWeight: 700, fontSize: 14 }}>${r.price?.toLocaleString(undefined, { maximumFractionDigits: 5 })}</div>
+              <div style={{ fontSize: 12, fontWeight: 600, color: verdictColor(r.verdict), textTransform: "uppercase" }}>{r.verdict}</div>
+            </div>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ================= Calculateur =================
 const LEVERAGE_PRESETS = {
   crypto: { label: "Crypto (CFD)", leverage: 2 },
@@ -856,11 +967,12 @@ export default function TradingApp() {
   const [prefillCalc, setPrefillCalc] = useState(null);
 
   const tabs = [
-    { id: "scan", label: "Scanner", icon: Search },
-    { id: "prix", label: "Prix & Niveaux", icon: LineChart },
-    { id: "dossier", label: "Dossier", icon: FileText },
-    { id: "calc", label: "Calculateur", icon: Calculator },
-  ];
+  { id: "scan", label: "Scanner", icon: Search },
+  { id: "top15", label: "Top 15", icon: ListOrdered },
+  { id: "prix", label: "Prix & Niveaux", icon: LineChart },
+  { id: "dossier", label: "Dossier", icon: FileText },
+  { id: "calc", label: "Calculateur", icon: Calculator },
+];
 
   return (
     <div style={{ minHeight: "100vh", background: NAVY, color: TEXT, padding: "28px 18px 60px" }}>
@@ -903,6 +1015,14 @@ export default function TradingApp() {
 
         {tab === "scan" && (
           <Scanner
+            onPick={(r) => {
+              setPrefillPrix(r);
+              setTab("prix");
+            }}
+          />
+        )}
+        {tab === "top15" && (
+          <Top15
             onPick={(r) => {
               setPrefillPrix(r);
               setTab("prix");
