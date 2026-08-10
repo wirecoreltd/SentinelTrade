@@ -10,8 +10,15 @@ export async function GET(request) {
 
   const url = `https://api.coingecko.com/api/v3/${path}?${params.toString()}`;
 
+  const cgKey = process.env.COINGECKO_KEY?.trim();
   try {
-    const res = await fetch(url, { headers: { Accept: "application/json" } });
+    const res = await fetch(url, {
+      headers: {
+        Accept: "application/json",
+        ...(cgKey ? { "x-cg-demo-api-key": cgKey } : {}),
+      },
+    });
+    
     const data = await res.json();
     if (!res.ok) {
       return Response.json({ error: data?.status?.error_message || "Erreur CoinGecko" }, { status: res.status });
