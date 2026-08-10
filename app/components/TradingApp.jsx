@@ -836,12 +836,15 @@ function Calculateur({ prefill }) {
   const [invested, setInvested] = useState("50");
   const [leverage, setLeverage] = useState(LEVERAGE_PRESETS.crypto.leverage.toString());
   const [entry, setEntry] = useState(prefill?.entry?.toString() || "");
-  const [stop, setStop] = useState(prefill?.stop?.toString() || "");
-  const [takeProfit, setTakeProfit] = useState("");
+  const [mode, setMode] = useState("auto"); // "auto" = % de la mise, "manuel" = prix exact
+  const [lossPct, setLossPct] = useState("15");
+  const [gainPct, setGainPct] = useState("30");
+  const [stopManual, setStopManual] = useState(prefill?.stop?.toString() || "");
+  const [takeProfitManual, setTakeProfitManual] = useState("");
 
   useEffect(() => {
     if (prefill?.entry) setEntry(prefill.entry.toString());
-    if (prefill?.stop) setStop(prefill.stop.toString());
+    if (prefill?.stop) { setStopManual(prefill.stop.toString()); setMode("manuel"); }
   }, [prefill]);
 
   const onAssetType = (t) => {
@@ -852,8 +855,15 @@ function Calculateur({ prefill }) {
   const inv = parseFloat(invested);
   const lev = parseFloat(leverage);
   const e = parseFloat(entry);
-  const s = parseFloat(stop);
-  const tp = parseFloat(takeProfit);
+  const lp = parseFloat(lossPct);
+  const gp = parseFloat(gainPct);
+
+  // Mode automatique : le stop/take-profit sont dérivés du % de la mise que tu es prêt à risquer/viser,
+  // ajusté par le levier — pas besoin de connaître un niveau de prix exact à l'avance.
+  const autoDistanceStop = e && lev && lp ? (e * (lp / 100)) / lev : null;
+  const autoDistanceGain = e && lev && gp ? (e * (gp / 100)) / lev : null;
+  const s = mode === "auto" ? (autoDistanceStop ? e - autoDistanceStop : null) : parseFloat(stopManual);
+  const tp = mode === "auto" ? (autoDistanceGain ? e + autoDistanceGain : null) : parseFloat(takeProfitManual);
 
   const valid = inv > 0 && lev > 0 && e > 0 && s > 0 && e !== s;
   const positionValue = valid ? inv * lev : null; // taille totale de la position en €
@@ -893,8 +903,37 @@ function Calculateur({ prefill }) {
       <CalcField label="Montant à investir — ta mise / marge (€)" value={invested} onChange={setInvested} placeholder="ex: 50" />
       <CalcField label="Levier (x1 = sans levier, ex: Binance spot)" value={leverage} onChange={setLeverage} placeholder="ex: 2" />
       <CalcField label="Prix d'entrée" value={entry} onChange={setEntry} placeholder="ex: 4346.55" />
-      <CalcField label="Stop-loss" value={stop} onChange={setStop} placeholder="ex: 4300.00" />
-      <CalcField label="Take-profit (optionnel)" value={takeProfit} onChange={setTakeProfit} placeholder="ex: 4420.00" />
+      <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+        {[["auto", "Automatique (%)"], ["manuel", "Manuel (prix)"]].map(([m, label]) => (
+          <button
+            key={m}
+            onClick={() => setMode(m)}
+            style={{
+              flex: 1, padding: "7px 0", borderRadius: 8,
+              border: `1px solid ${mode === m ? ACCENT : LINE}`,
+              background: mode === m ? "rgba(79,140,255,0.12)" : "transparent",
+              color: mode === m ? ACCENT : MUTED, fontSize: 12, fontWeight: 600, cursor: "pointer",
+            }}
+          >{label}</button>
+        ))}
+      </div>
+
+      {mode === "auto" ? (
+        <>
+          <CalcField label="Perte max acceptée (% de la mise)" value={lossPct} onChange={setLossPct} placeholder="15" />
+          <CalcField label="Gain visé (% de la mise)" value={gainPct} onChange={setGainPct} placeholder="30" />
+          {s && tp && (
+            <div style={{ fontSize: 12, color: MUTED, marginBottom: 8 }}>
+              → Stop calculé : {s.toFixed(4)} — Take-profit calculé : {tp.toFixed(4)}
+            </div>
+          )}
+        </>
+      ) : (
+        <>
+          <CalcField label="Stop-loss (prix exact)" value={stopManual} onChange={setStopManual} placeholder="ex: 4300.00" />
+          <CalcField label="Take-profit (prix exact, optionnel)" value={takeProfitManual} onChange={setTakeProfitManual} placeholder="ex: 4420.00" />
+        </>
+      )}
 
       {valid ? (
         <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 16, marginTop: 8 }}>
