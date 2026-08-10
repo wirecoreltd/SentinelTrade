@@ -733,6 +733,7 @@ function Top15({ onPick }) {
           const { verdict, score } = verdictFromHistory(history);
           results.push({ type: "crypto", query: c.id, name: c.symbol.toUpperCase(), price: c.current_price, verdict, score });
         } catch {}
+        await new Promise((r) => setTimeout(r, 400));
       }
     } catch {
       setError("Cryptos indisponibles pour l'instant.");
