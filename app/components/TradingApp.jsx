@@ -12,7 +12,9 @@ import {
   Minus,
   Send,
   ListOrdered,
+  Wallet,
 } from "lucide-react";
+import LongTermTab from "./LongTermTab";
 
 // ---------- Thème ----------
 const NAVY = "#0E1420";
@@ -1039,8 +1041,9 @@ export default function TradingApp() {
   const tabs = [
   { id: "scan", label: "Scanner", icon: Search },
   { id: "top15", label: "Top 15", icon: ListOrdered },
-  { id: "prix", label: "Prix & Niveaux", icon: LineChart }, 
+  { id: "prix", label: "Prix & Niveaux", icon: LineChart },
   { id: "calc", label: "Calculateur", icon: Calculator },
+  { id: "longterme", label: "Long Terme", icon: Wallet },
 ];
 
   return (
@@ -1101,8 +1104,8 @@ export default function TradingApp() {
         {tab === "prix" && (
           <PrixNiveaux prefill={prefillPrix} setTab={setTab} setPrefillCalc={setPrefillCalc} />
         )}
-       
         {tab === "calc" && <Calculateur prefill={prefillCalc} />}
+        {tab === "longterme" && <LongTermTab />}
       </div>
     </div>
   );
