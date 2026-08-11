@@ -73,7 +73,15 @@ async function fetchCoinGeckoHistory(id, days) {
   // vraies bougies OHLC. On approxime high = low = close : l'ATR/ADX calculés
   // dessus sont donc une volatilité clôture-à-clôture, pas une vraie amplitude
   // intrajournalière. C'est signalé dans le raisonnement du Dossier.
-  return data.prices.map(([ts, price]) => ({ date: ts, close: price, high: price, low: price }));
+  // "open" est approximé par la clôture de la veille (convention standard
+  // quand l'open réel n'est pas disponible) : sert au pivot DeMark.
+  return data.prices.map(([ts, price], i, arr) => ({
+    date: ts,
+    close: price,
+    high: price,
+    low: price,
+    open: i === 0 ? price : arr[i - 1][1],
+  }));
 }
 
 async function fetchCoinGeckoTop(n = 10) {
@@ -114,6 +122,7 @@ async function fetchAlphaHistory(symbol) {
       close: parseFloat(v["4. close"]),
       high: parseFloat(v["2. high"]),
       low: parseFloat(v["3. low"]),
+      open: parseFloat(v["1. open"]),
     }))
     .sort((a, b) => new Date(a.date) - new Date(b.date));
 }
@@ -146,6 +155,7 @@ async function fetchFxHistory(symbol) {
       close: parseFloat(v["4. close"]),
       high: parseFloat(v["2. high"]),
       low: parseFloat(v["3. low"]),
+      open: parseFloat(v["1. open"]),
     }))
     .sort((a, b) => new Date(a.date) - new Date(b.date));
 }
@@ -515,6 +525,143 @@ function classifyMarketRegime(adxVal, choppinessVal) {
   return "transition";
 }
 
+// ==================================================================
+// PASS 2 — Pivot Points & Fibonacci (niveaux de Support/Résistance avancés)
+// Les pivots sont calculés à partir de la DERNIÈRE bougie complète de
+// l'historique (H/L/C — et O pour DeMark) : ce sont donc les niveaux
+// projetés pour la prochaine séance, comme sur un terminal de trading.
+// Les niveaux Fibonacci sont calculés sur le dernier swing détecté par
+// detectMarketStructure (swing low <-> swing high), pas sur tout
+// l'historique : ça reste pertinent tant que ce swing est le mouvement
+// dominant en cours.
+// ==================================================================
+
+// Pivot Points "Standard" (classique/floor trader).
+function calcPivotStandard(h, l, c) {
+  const pp = (h + l + c) / 3;
+  return {
+    pp,
+    r1: 2 * pp - l,
+    s1: 2 * pp - h,
+    r2: pp + (h - l),
+    s2: pp - (h - l),
+    r3: h + 2 * (pp - l),
+    s3: l - 2 * (h - pp),
+  };
+}
+
+// Pivot Points "Fibonacci" : mêmes PP que le standard, mais les
+// écartements R/S utilisent les ratios de Fibonacci (0.382/0.618/1.0)
+// plutôt que la géométrie du floor trader.
+function calcPivotFibonacci(h, l, c) {
+  const pp = (h + l + c) / 3;
+  const range = h - l;
+  return {
+    pp,
+    r1: pp + 0.382 * range,
+    s1: pp - 0.382 * range,
+    r2: pp + 0.618 * range,
+    s2: pp - 0.618 * range,
+    r3: pp + range,
+    s3: pp - range,
+  };
+}
+
+// Pivot Points "Camarilla" : niveaux resserrés autour de la clôture,
+// pensés pour du intraday (R3/S3 = zones de retournement probables,
+// R4/S4 = zones de breakout).
+function calcPivotCamarilla(h, l, c) {
+  const range = h - l;
+  return {
+    pp: c,
+    r1: c + (range * 1.1) / 12,
+    s1: c - (range * 1.1) / 12,
+    r2: c + (range * 1.1) / 6,
+    s2: c - (range * 1.1) / 6,
+    r3: c + (range * 1.1) / 4,
+    s3: c - (range * 1.1) / 4,
+    r4: c + (range * 1.1) / 2,
+    s4: c - (range * 1.1) / 2,
+  };
+}
+
+// Pivot Points "Woodie" : donne plus de poids à la clôture qu'à
+// l'ouverture/l'amplitude, censé mieux coller aux marchés qui gappent.
+function calcPivotWoodie(h, l, c) {
+  const pp = (h + l + 2 * c) / 4;
+  return {
+    pp,
+    r1: 2 * pp - l,
+    s1: 2 * pp - h,
+    r2: pp + (h - l),
+    s2: pp - (h - l),
+  };
+}
+
+// Pivot "DeMark" : asymétrique, dépend de la position de la clôture par
+// rapport à l'ouverture. Nécessite un "open" — approximé pour les cryptos
+// (clôture de la veille), voir fetchCoinGeckoHistory.
+function calcPivotDeMark(h, l, c, o) {
+  let x;
+  if (c < o) x = h + 2 * l + c;
+  else if (c > o) x = 2 * h + l + c;
+  else x = h + l + 2 * c;
+  const pp = x / 4;
+  return {
+    pp,
+    r1: x / 2 - l,
+    s1: x / 2 - h,
+  };
+}
+
+function calcAllPivots(history, lastIdx) {
+  const last = history[lastIdx];
+  const { high: h, low: l, close: c } = last;
+  const o = last.open != null ? last.open : c;
+  return {
+    standard: calcPivotStandard(h, l, c),
+    fibonacci: calcPivotFibonacci(h, l, c),
+    camarilla: calcPivotCamarilla(h, l, c),
+    woodie: calcPivotWoodie(h, l, c),
+    demark: calcPivotDeMark(h, l, c, o),
+  };
+}
+
+// Retracements de Fibonacci entre un swing low et un swing high : niveaux
+// classiques utilisés comme zones de support/résistance potentielles à
+// l'intérieur du swing.
+function calcFibonacciRetracement(low, high) {
+  const range = high - low;
+  return {
+    "0.0": high,
+    "0.236": high - 0.236 * range,
+    "0.382": high - 0.382 * range,
+    "0.5": high - 0.5 * range,
+    "0.618": high - 0.618 * range,
+    "0.786": high - 0.786 * range,
+    "1.0": low,
+  };
+}
+
+// Extensions de Fibonacci au-delà du swing : cibles de continuation si
+// la tendance du swing se poursuit (haussier = extension au-dessus du
+// high, baissier = extension en-dessous du low).
+function calcFibonacciExtension(low, high, direction) {
+  const range = high - low;
+  if (direction === "haussier") {
+    return {
+      "1.272": high + 0.272 * range,
+      "1.618": high + 0.618 * range,
+      "2.0": high + range,
+    };
+  }
+  return {
+    "1.272": low - 0.272 * range,
+    "1.618": low - 0.618 * range,
+    "2.0": low - range,
+  };
+}
+
 // DMI / ADX façon Wilder.
 function calcADX(history, period = 14) {
   const n = history.length;
@@ -804,6 +951,17 @@ async function runMarketAnalysis(type, query) {
   const choppinessLast = calcChoppinessIndex(history)[lastIdx];
   const marketRegime = classifyMarketRegime(adxLast, choppinessLast);
 
+  // ---- Pass 2 : Pivot Points & Fibonacci ----
+  const pivots = calcAllPivots(history, lastIdx);
+  const fibRetracement =
+    structure.support != null && structure.resistance != null
+      ? calcFibonacciRetracement(structure.support, structure.resistance)
+      : null;
+  const fibExtension =
+    structure.support != null && structure.resistance != null && structure.regime !== "range"
+      ? calcFibonacciExtension(structure.support, structure.resistance, structure.regime)
+      : null;
+
   const atrSeriesAll = calcATR(history, 14).filter((v) => v != null);
   const atrAvg = atrSeriesAll.length ? atrSeriesAll.reduce((a, b) => a + b, 0) / atrSeriesAll.length : null;
   const volRegime =
@@ -878,6 +1036,12 @@ async function runMarketAnalysis(type, query) {
     if (hmaLast > hmaPrev) bull += 0.5;
     else if (hmaLast < hmaPrev) bear += 0.5;
   }
+  // Pivot Point standard : position du prix par rapport au pivot central,
+  // signal de confirmation secondaire au même titre que les briques ci-dessus.
+  if (pivots?.standard?.pp != null) {
+    if (currentPrice > pivots.standard.pp) bull += 0.5;
+    else if (currentPrice < pivots.standard.pp) bear += 0.5;
+  }
 
   let verdict = "mitigé";
   if (bull - bear >= 2) verdict = "haussier";
@@ -949,6 +1113,14 @@ async function runMarketAnalysis(type, query) {
     stdDevLast != null && `Écart-type(20) des clôtures : $${stdDevLast.toFixed(2)}`,
     choppinessLast != null && `Choppiness Index(14) : ${choppinessLast.toFixed(0)}`,
     `Régime de marché : ${marketRegime}${volRegime ? ` — volatilité ${volRegime}` : ""}`,
+    pivots?.standard != null &&
+      `Pivot Point (Standard) : $${pivots.standard.pp.toFixed(2)} — R1 $${pivots.standard.r1.toFixed(2)} / S1 $${pivots.standard.s1.toFixed(2)}, prix ${currentPrice > pivots.standard.pp ? "au-dessus" : "en-dessous"} du pivot`,
+    pivots?.camarilla != null &&
+      `Pivot Camarilla : R3 $${pivots.camarilla.r3.toFixed(2)} / S3 $${pivots.camarilla.s3.toFixed(2)} (zones de retournement intraday)`,
+    fibRetracement != null &&
+      `Retracements Fibonacci du dernier swing : 38,2% $${fibRetracement["0.382"].toFixed(2)} — 50% $${fibRetracement["0.5"].toFixed(2)} — 61,8% $${fibRetracement["0.618"].toFixed(2)}`,
+    fibExtension != null &&
+      `Extensions Fibonacci (cibles de continuation ${structure.regime}) : 127,2% $${fibExtension["1.272"].toFixed(2)} — 161,8% $${fibExtension["1.618"].toFixed(2)}`,
     atr != null &&
       `ATR(14) : $${atr.toFixed(2)}${atrAvg != null ? ` (moyenne : $${atrAvg.toFixed(2)})` : ""}${type === "crypto" ? " — approximé en clôture-à-clôture faute d'OHLC gratuit" : ""}`,
     news
@@ -969,6 +1141,9 @@ async function runMarketAnalysis(type, query) {
     news,
     atrStop,
     atrStopShort,
+    pivots,
+    fibRetracement,
+    fibExtension,
   };
 }
 
@@ -1359,6 +1534,60 @@ function Dossier({ setTab, setPrefillCalc }) {
               </div>
             ))}
           </div>
+
+          {dossier.pivots && (
+            <div style={{ marginBottom: 14, borderTop: `1px solid ${LINE}`, paddingTop: 10 }}>
+              <div style={{ fontSize: 11, color: MUTED, marginBottom: 8, textTransform: "uppercase" }}>
+                Pivot Points (Standard)
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, marginBottom: 12 }}>
+                <div style={{ background: NAVY, borderRadius: 8, padding: 8, textAlign: "center" }}>
+                  <div style={{ fontSize: 10, color: MUTED }}>S1</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: POS }}>${dossier.pivots.standard.s1.toFixed(2)}</div>
+                </div>
+                <div style={{ background: NAVY, borderRadius: 8, padding: 8, textAlign: "center" }}>
+                  <div style={{ fontSize: 10, color: MUTED }}>Pivot</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: ACCENT }}>${dossier.pivots.standard.pp.toFixed(2)}</div>
+                </div>
+                <div style={{ background: NAVY, borderRadius: 8, padding: 8, textAlign: "center" }}>
+                  <div style={{ fontSize: 10, color: MUTED }}>R1</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: NEG }}>${dossier.pivots.standard.r1.toFixed(2)}</div>
+                </div>
+              </div>
+
+              {dossier.fibRetracement && (
+                <>
+                  <div style={{ fontSize: 11, color: MUTED, marginBottom: 8, textTransform: "uppercase" }}>
+                    Retracements Fibonacci (dernier swing)
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: dossier.fibExtension ? 12 : 0 }}>
+                    {["0.236", "0.382", "0.5", "0.618", "0.786"].map((k) => (
+                      <div key={k} style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
+                        <span style={{ color: MUTED }}>{(parseFloat(k) * 100).toFixed(1)}%</span>
+                        <span style={{ color: TEXT, fontWeight: 600 }}>${dossier.fibRetracement[k].toFixed(2)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+
+              {dossier.fibExtension && (
+                <>
+                  <div style={{ fontSize: 11, color: MUTED, marginBottom: 8, textTransform: "uppercase" }}>
+                    Extensions Fibonacci (cibles)
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    {["1.272", "1.618", "2.0"].map((k) => (
+                      <div key={k} style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
+                        <span style={{ color: MUTED }}>{(parseFloat(k) * 100).toFixed(1)}%</span>
+                        <span style={{ color: ACCENT, fontWeight: 600 }}>${dossier.fibExtension[k].toFixed(2)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
 
           {dossier.news?.headlines?.length > 0 && (
             <div style={{ marginBottom: 14, borderTop: `1px solid ${LINE}`, paddingTop: 10 }}>
