@@ -1056,34 +1056,66 @@ function TopMarkets({ onSendToCalculator }) {
   const [error, setError] = useState("");
   const [hasRun, setHasRun] = useState(false);
 
-  const runScan = async () => {
+  const runScan = useCallback(async () => {
     setLoading(true);
     setError("");
     setResults([]);
     setProgress({ done: 0, total: WATCHLIST.length });
-    const out = [];
 
-    for (const item of WATCHLIST) {
+    const settled = new Array(WATCHLIST.length);
+    let doneCount = 0;
+    const markDone = (idx, value) => {
+      settled[idx] = value;
+      doneCount += 1;
+      setProgress({ done: doneCount, total: WATCHLIST.length });
+    };
+
+    // On sépare les marchés selon leur contrainte de débit :
+    // - crypto + or/argent (CoinGecko / gold-api.com) : pas de vraie limite,
+    //   on peut les lancer en parallèle par petits paquets.
+    // - devises (Alpha Vantage, 5 req/min en gratuit) : on les garde
+    //   espacées, mais ce bloc tourne EN MEME TEMPS que le bloc rapide
+    //   au lieu d'attendre qu'il ait fini.
+    const fastIndexes = [];
+    const fxIndexes = [];
+    WATCHLIST.forEach((item, idx) => {
+      if (item.type === "fx" && !isMetal(item.query)) fxIndexes.push(idx);
+      else fastIndexes.push(idx);
+    });
+
+    const runOne = async (idx) => {
+      const item = WATCHLIST[idx];
       try {
         const r = await runMarketAnalysis(item.type, item.query);
-        out.push({ ...r, label: item.label, type: item.type, query: item.query });
+        markDone(idx, { ...r, label: item.label, type: item.type, query: item.query });
       } catch (e) {
-        out.push({ label: item.label, type: item.type, query: item.query, error: e.message });
+        markDone(idx, { label: item.label, type: item.type, query: item.query, error: e.message });
       }
-      setProgress((p) => ({ ...p, done: p.done + 1 }));
-      // Pause de sécurité entre chaque appel : CoinGecko rate-limite si on
-      // enchaîne trop de requêtes d'affilée (d'où les "Failed to fetch" sur
-      // les cryptos), et Alpha Vantage limite à 5 requêtes/minute en plus
-      // du quota de 25/jour.
-      if (item.type === "fx" && !isMetal(item.query)) {
-        await new Promise((res) => setTimeout(res, 3000));
-      } else {
-        await new Promise((res) => setTimeout(res, 800));
-      }
-    }
+    };
 
-    const ok = out.filter((r) => !r.error);
-    const failed = out.filter((r) => r.error);
+    const BATCH_SIZE = 4;
+    const runFast = async () => {
+      for (let i = 0; i < fastIndexes.length; i += BATCH_SIZE) {
+        const batch = fastIndexes.slice(i, i + BATCH_SIZE);
+        await Promise.all(batch.map(runOne));
+      }
+    };
+
+    const runFx = async () => {
+      for (const idx of fxIndexes) {
+        await runOne(idx);
+        // Espacement réduit à 1s (au lieu de 3s) : 5 devises = 5 requêtes
+        // Alpha Vantage, largement sous la limite de 5/min même avec ce délai.
+        await new Promise((res) => setTimeout(res, 1000));
+      }
+    };
+
+    // Les deux blocs tournent en parallèle : le temps total du scan est
+    // borné par le plus lent des deux, pas par leur somme.
+    await Promise.all([runFast(), runFx()]);
+
+    const ok = settled.filter((r) => !r.error);
+    const failed = settled.filter((r) => r.error);
     ok.sort((a, b) => b.score - a.score);
     setResults([...ok, ...failed]);
     if (failed.length > 0 && ok.length === 0) {
@@ -1091,46 +1123,51 @@ function TopMarkets({ onSendToCalculator }) {
     }
     setHasRun(true);
     setLoading(false);
-  };
+  }, []);
+
+  // Scan automatique dès l'ouverture de l'onglet (ce composant n'est monté
+  // que quand tab === "top15", donc ça se relance à chaque fois qu'on
+  // revient sur l'onglet).
+  useEffect(() => {
+    runScan();
+  }, [runScan]);
 
   return (
     <div>
       <div style={{ fontSize: 13, color: MUTED, marginBottom: 16 }}>
         Scan classé de 15 marchés (8 cryptos, or, argent, 5 devises majeures) avec la même
         analyse que le Dossier — tendances 7j/30j/90j + sentiment des actualités. Clique un
-        marché pour l'envoyer directement au calculateur. Le scan prend environ 20 à 30 secondes.
+        marché pour l'envoyer directement au calculateur.
       </div>
 
-      <button
-        onClick={runScan}
-        disabled={loading}
-        style={{
-          width: "100%",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          gap: 8,
-          background: loading ? PANEL : ACCENT,
-          border: "none",
-          borderRadius: 8,
-          padding: "12px 0",
-          color: loading ? MUTED : "#fff",
-          fontWeight: 700,
-          fontSize: 14,
-          cursor: loading ? "default" : "pointer",
-          marginBottom: 16,
-        }}
-      >
-        {loading ? (
-          <>
-            <Loader2 className="spin" size={16} /> Analyse {progress.done}/{progress.total}…
-          </>
-        ) : (
-          <>
-            <ListOrdered size={16} /> {hasRun ? "Relancer le scan" : "Lancer le scan"}
-          </>
-        )}
-      </button>
+      {loading && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16, color: MUTED, fontSize: 13 }}>
+          <Loader2 className="spin" size={16} color={ACCENT} />
+          Analyse {progress.done}/{progress.total}…
+        </div>
+      )}
+
+      {!loading && hasRun && (
+        <button
+          onClick={runScan}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            background: "none",
+            border: `1px solid ${LINE}`,
+            borderRadius: 20,
+            padding: "6px 12px",
+            color: MUTED,
+            fontSize: 12,
+            fontWeight: 600,
+            cursor: "pointer",
+            marginBottom: 16,
+          }}
+        >
+          <ListOrdered size={13} /> Actualiser
+        </button>
+      )}
 
       {error && <div style={{ color: NEG, fontSize: 13, marginBottom: 10 }}>{error}</div>}
 
@@ -1153,11 +1190,6 @@ function TopMarkets({ onSendToCalculator }) {
 
             const action = ACTION_MAP[r.verdict] || ACTION_MAP["mitigé"];
             const hasLevels = r.support != null && r.resistance != null;
-            // Prix d'achat = support (swing low, zone d'entrée) ; prix de
-            // vente = résistance (swing high, zone de sortie). Stop-loss =
-            // support - 1.2×ATR, dimensionné sur la volatilité réelle de
-            // l'actif (repli sur -2% si l'ATR est indisponible). Pour
-            // l'or/argent (pas d'historique gratuit), on n'envoie que le prix actuel.
             const buyPrice = hasLevels ? r.support : r.price;
             const sellPrice = hasLevels ? r.resistance : null;
             const stopPrice = hasLevels ? r.atrStop ?? buyPrice * 0.98 : null;
