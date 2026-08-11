@@ -776,6 +776,55 @@ function checkBreakEven(entry, stop, currentPrice, direction, buffer = 0) {
   return { triggered, rMultiple, newStop: triggered ? newStop : stop };
 }
 
+// Cibles en multiples de R (1R = distance risquée entrée→stop). Le palier
+// classique 1R/2R/3R/4R permet de raisonner en "combien de fois mon risque
+// initial" plutôt qu'en niveau de prix absolu.
+function calcRMultipleTargets(entry, stop, direction) {
+  if (entry == null || stop == null) return null;
+  const risk = Math.abs(entry - stop);
+  if (risk === 0) return null;
+  const sign = direction === "haussier" ? 1 : -1;
+  return {
+    r1: entry + sign * risk * 1,
+    r2: entry + sign * risk * 2,
+    r3: entry + sign * risk * 3,
+    r4: entry + sign * risk * 4,
+  };
+}
+
+// Take Profit basé sur l'ATR : utile en l'absence de niveau structurel
+// proche (résistance/support trop loin ou inexistant).
+function calcATRTarget(entry, atr, direction, multiplier = 2) {
+  if (entry == null || atr == null) return null;
+  return direction === "haussier" ? entry + multiplier * atr : entry - multiplier * atr;
+}
+
+// Take Profit partiel : sort la position par paliers de R (1R/2R/3R par
+// défaut, 30/30/40%) plutôt que tout d'un coup sur une seule cible —
+// sécurise du gain tôt tout en laissant courir une partie de la position.
+function calcPartialTakeProfit(
+  entry,
+  stop,
+  direction,
+  quantity,
+  tiers = [
+    { rMultiple: 1, pct: 30 },
+    { rMultiple: 2, pct: 30 },
+    { rMultiple: 3, pct: 40 },
+  ]
+) {
+  if (entry == null || stop == null || quantity == null) return null;
+  const risk = Math.abs(entry - stop);
+  if (risk === 0) return null;
+  const sign = direction === "haussier" ? 1 : -1;
+  return tiers.map((t) => {
+    const price = entry + sign * risk * t.rMultiple;
+    const qty = quantity * (t.pct / 100);
+    const gain = qty * risk * t.rMultiple;
+    return { ...t, price, qty, gain };
+  });
+}
+
 // DMI / ADX façon Wilder.
 function calcADX(history, period = 14) {
   const n = history.length;
@@ -1208,6 +1257,22 @@ async function runMarketAnalysis(type, query) {
       ? calcRiskReward(currentPrice, recommendedStopShort, support)
       : null;
 
+  // Cibles Take Profit : paliers R-multiples (1R→4R) sur le stop recommandé,
+  // + une cible alternative basée sur l'ATR pour les cas sans niveau
+  // structurel exploitable. Calculées uniquement quand un biais net existe.
+  const rTargets =
+    structure.regime === "haussier"
+      ? calcRMultipleTargets(currentPrice, recommendedStopLong, "haussier")
+      : structure.regime === "baissier"
+      ? calcRMultipleTargets(currentPrice, recommendedStopShort, "baissier")
+      : null;
+  const atrTarget =
+    structure.regime === "haussier"
+      ? calcATRTarget(currentPrice, atr, "haussier", 2)
+      : structure.regime === "baissier"
+      ? calcATRTarget(currentPrice, atr, "baissier", 2)
+      : null;
+
   const trendLabel =
     ema20 != null && ema50 != null
       ? currentPrice > ema20 && ema20 > ema50
@@ -1275,6 +1340,9 @@ async function runMarketAnalysis(type, query) {
       `Chandelier Exit(22,3) : long $${chandelierStopLong?.toFixed(2)} / short $${chandelierStopShort?.toFixed(2)}`,
     (recommendedStopLong != null || recommendedStopShort != null) &&
       `Stop recommandé (le plus prudent entre ATR et Chandelier) : $${(structure.regime === "baissier" ? recommendedStopShort : recommendedStopLong)?.toFixed(2)}`,
+    rTargets != null &&
+      `Cibles R-multiples : 1R $${rTargets.r1.toFixed(2)} — 2R $${rTargets.r2.toFixed(2)} — 3R $${rTargets.r3.toFixed(2)}`,
+    atrTarget != null && `Cible ATR (×2) : $${atrTarget.toFixed(2)}`,
     news
       ? `Actualités : ton ${news.label} sur ${news.articleCount} articles récents`
       : newsError
@@ -1297,6 +1365,8 @@ async function runMarketAnalysis(type, query) {
     chandelierStopShort,
     recommendedStopLong,
     recommendedStopShort,
+    rTargets,
+    atrTarget,
     pivots,
     fibRetracement,
     fibExtension,
@@ -2129,6 +2199,10 @@ function Calculateur({ prefill }) {
   const breakEven = valid && cp > 0 ? checkBreakEven(e, s, cp, direction) : null;
   const trailingAtrStop = valid && cp > 0 && atrVal > 0 ? calcTrailingStopATR(cp, atrVal, direction, 3, s) : null;
 
+  // Take Profit par paliers 1R/2R/3R (30/30/40%), calculé sur la taille de
+  // position déjà déterminée plus haut (quantity).
+  const partialTP = valid ? calcPartialTakeProfit(e, s, direction, quantity) : null;
+
   return (
     <div>
       <div style={{ fontSize: 12, color: MUTED, marginBottom: 6 }}>Type d'actif (fixe le levier par défaut)</div>
@@ -2223,6 +2297,43 @@ function Calculateur({ prefill }) {
         </div>
       ) : (
         <div style={{ fontSize: 12, color: MUTED, marginTop: 8 }}>Remplis montant, levier, entrée et stop-loss pour voir le calcul.</div>
+      )}
+
+      {valid && partialTP && (
+        <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 16, marginTop: 12 }}>
+          <div style={{ fontSize: 12, color: ACCENT, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 10 }}>
+            Take Profit par paliers (1R / 2R / 3R)
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {partialTP.map((tier, i) => (
+              <div
+                key={i}
+                style={{
+                  background: NAVY,
+                  borderRadius: 8,
+                  padding: 10,
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                }}
+              >
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 700 }}>
+                    TP{i + 1} — {tier.rMultiple}R ({tier.pct}% de la position)
+                  </div>
+                  <div style={{ fontSize: 11, color: MUTED }}>Prix : {tier.price.toFixed(2)}</div>
+                </div>
+                <div style={{ fontSize: 14, fontWeight: 700, color: POS }}>+{tier.gain.toFixed(2)} €</div>
+              </div>
+            ))}
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", marginTop: 10, paddingTop: 10, borderTop: `1px solid ${LINE}` }}>
+            <span style={{ fontSize: 13, color: MUTED }}>Gain total si les 3 paliers sont touchés</span>
+            <span style={{ fontSize: 15, fontWeight: 700, color: POS }}>
+              +{partialTP.reduce((sum, t) => sum + t.gain, 0).toFixed(2)} €
+            </span>
+          </div>
+        </div>
       )}
 
       {valid && (
