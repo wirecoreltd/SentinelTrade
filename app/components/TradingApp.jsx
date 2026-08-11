@@ -12,12 +12,7 @@ import {
   Minus,
   Send,
   ListOrdered,
-  BookOpen,
-  Trash2,
-  Dices,
 } from "lucide-react";
-import { getTrades, addTrade, deleteTrade, computeStats, monteCarloSimulation } from "../lib/journal";
-import calculateSentinelScore from "../lib/sentinelEngine";
 
 // ---------- Thème ----------
 const NAVY = "#0E1420";
@@ -78,15 +73,7 @@ async function fetchCoinGeckoHistory(id, days) {
   // vraies bougies OHLC. On approxime high = low = close : l'ATR/ADX calculés
   // dessus sont donc une volatilité clôture-à-clôture, pas une vraie amplitude
   // intrajournalière. C'est signalé dans le raisonnement du Dossier.
-  // "open" est approximé par la clôture de la veille (convention standard
-  // quand l'open réel n'est pas disponible) : sert au pivot DeMark.
-  return data.prices.map(([ts, price], i, arr) => ({
-    date: ts,
-    close: price,
-    high: price,
-    low: price,
-    open: i === 0 ? price : arr[i - 1][1],
-  }));
+  return data.prices.map(([ts, price]) => ({ date: ts, close: price, high: price, low: price }));
 }
 
 async function fetchCoinGeckoTop(n = 10) {
@@ -127,7 +114,6 @@ async function fetchAlphaHistory(symbol) {
       close: parseFloat(v["4. close"]),
       high: parseFloat(v["2. high"]),
       low: parseFloat(v["3. low"]),
-      open: parseFloat(v["1. open"]),
     }))
     .sort((a, b) => new Date(a.date) - new Date(b.date));
 }
@@ -160,7 +146,6 @@ async function fetchFxHistory(symbol) {
       close: parseFloat(v["4. close"]),
       high: parseFloat(v["2. high"]),
       low: parseFloat(v["3. low"]),
-      open: parseFloat(v["1. open"]),
     }))
     .sort((a, b) => new Date(a.date) - new Date(b.date));
 }
@@ -247,587 +232,6 @@ function calcATR(history, period = 14) {
     out[i] = atr;
   }
   return out;
-}
-
-// ==================================================================
-// PASS 1 — Nouveaux indicateurs techniques (Trend / Momentum / Volatility)
-// Ajoutés en complément du socle EMA/ADX/Ichimoku/Structure ci-dessus.
-// Tous acceptent le même format d'historique { date, close, high, low }.
-// Pour les cryptos (CoinGecko market_chart), high = low = close, donc les
-// indicateurs basés sur l'amplitude (Stochastic, CCI, Aroon, Supertrend,
-// PSAR, Williams %R, Choppiness, Keltner) dégénèrent partiellement — c'est
-// la même limitation que pour l'ATR/ADX existants, déjà documentée plus haut.
-// ==================================================================
-
-// --- Trend ---
-
-function calcSMA(values, period) {
-  const out = new Array(values.length).fill(null);
-  for (let i = period - 1; i < values.length; i++) {
-    let sum = 0;
-    for (let j = i - period + 1; j <= i; j++) sum += values[j];
-    out[i] = sum / period;
-  }
-  return out;
-}
-
-function calcWMA(values, period) {
-  const out = new Array(values.length).fill(null);
-  const denom = (period * (period + 1)) / 2;
-  for (let i = period - 1; i < values.length; i++) {
-    let sum = 0;
-    for (let j = 0; j < period; j++) sum += values[i - period + 1 + j] * (j + 1);
-    out[i] = sum / denom;
-  }
-  return out;
-}
-
-// Hull MA = WMA(2×WMA(n/2) − WMA(n), √n). Réagit plus vite que l'EMA tout en
-// restant lissée. Approximation : les nulls de tête de la WMA intermédiaire
-// sont remplacés par la valeur brute avant le second passage WMA, pour ne
-// pas perdre toute la série — sans impact une fois la période "period" passée.
-function calcHMA(values, period) {
-  const halfPeriod = Math.max(1, Math.round(period / 2));
-  const sqrtPeriod = Math.max(1, Math.round(Math.sqrt(period)));
-  const wmaHalf = calcWMA(values, halfPeriod);
-  const wmaFull = calcWMA(values, period);
-  const diff = values.map((_, i) => (wmaHalf[i] != null && wmaFull[i] != null ? 2 * wmaHalf[i] - wmaFull[i] : null));
-  const filled = diff.map((d, i) => (d == null ? values[i] : d));
-  const hma = calcWMA(filled, sqrtPeriod);
-  return hma.map((h, i) => (diff[i] == null ? null : h));
-}
-
-function calcMACD(closes, fast = 12, slow = 26, signalPeriod = 9) {
-  const emaFast = calcEMA(closes, fast);
-  const emaSlow = calcEMA(closes, slow);
-  const macdLine = closes.map((_, i) => emaFast[i] - emaSlow[i]);
-  const signalLine = calcEMA(macdLine, signalPeriod);
-  const histogram = macdLine.map((m, i) => m - signalLine[i]);
-  return { macdLine, signalLine, histogram };
-}
-
-// Supertrend (période ATR 10, multiplicateur 3 par défaut).
-function calcSupertrend(history, period = 10, multiplier = 3) {
-  const atr = calcATR(history, period);
-  const n = history.length;
-  const finalUpper = new Array(n).fill(null);
-  const finalLower = new Array(n).fill(null);
-  const trend = new Array(n).fill(null); // 'up' | 'down'
-  for (let i = 0; i < n; i++) {
-    if (atr[i] == null) continue;
-    const mid = (history[i].high + history[i].low) / 2;
-    const basicUpper = mid + multiplier * atr[i];
-    const basicLower = mid - multiplier * atr[i];
-    if (finalUpper[i - 1] == null) {
-      finalUpper[i] = basicUpper;
-      finalLower[i] = basicLower;
-      trend[i] = history[i].close > basicUpper ? "up" : "down";
-      continue;
-    }
-    finalUpper[i] =
-      basicUpper < finalUpper[i - 1] || history[i - 1].close > finalUpper[i - 1] ? basicUpper : finalUpper[i - 1];
-    finalLower[i] =
-      basicLower > finalLower[i - 1] || history[i - 1].close < finalLower[i - 1] ? basicLower : finalLower[i - 1];
-    const prevTrend = trend[i - 1];
-    trend[i] =
-      prevTrend === "up"
-        ? history[i].close < finalLower[i] ? "down" : "up"
-        : history[i].close > finalUpper[i] ? "up" : "down";
-  }
-  return { trend, upperBand: finalUpper, lowerBand: finalLower };
-}
-
-function calcAroon(history, period = 25) {
-  const n = history.length;
-  const aroonUp = new Array(n).fill(null);
-  const aroonDown = new Array(n).fill(null);
-  for (let i = period; i < n; i++) {
-    const windowSlice = history.slice(i - period, i + 1); // period+1 bougies jusqu'à i inclus
-    let highestIdx = 0, lowestIdx = 0;
-    windowSlice.forEach((h, j) => {
-      if (h.high >= windowSlice[highestIdx].high) highestIdx = j;
-      if (h.low <= windowSlice[lowestIdx].low) lowestIdx = j;
-    });
-    aroonUp[i] = (highestIdx / period) * 100;
-    aroonDown[i] = (lowestIdx / period) * 100;
-  }
-  return { aroonUp, aroonDown };
-}
-
-// Parabolic SAR (accélération 0.02, max 0.2 par défaut).
-function calcParabolicSAR(history, step = 0.02, maxStep = 0.2) {
-  const n = history.length;
-  const sar = new Array(n).fill(null);
-  const trend = new Array(n).fill(null);
-  if (n < 2) return { sar, trend };
-  let isUp = history[1].close > history[0].close;
-  let af = step;
-  let ep = isUp ? history[0].high : history[0].low;
-  let currentSar = isUp ? history[0].low : history[0].high;
-  sar[0] = currentSar;
-  trend[0] = isUp ? "up" : "down";
-  for (let i = 1; i < n; i++) {
-    currentSar = currentSar + af * (ep - currentSar);
-    if (isUp) {
-      const prevLow2 = i >= 2 ? history[i - 2].low : history[i - 1].low;
-      currentSar = Math.min(currentSar, history[i - 1].low, prevLow2);
-      if (history[i].low < currentSar) {
-        isUp = false;
-        currentSar = ep;
-        ep = history[i].low;
-        af = step;
-      } else if (history[i].high > ep) {
-        ep = history[i].high;
-        af = Math.min(af + step, maxStep);
-      }
-    } else {
-      const prevHigh2 = i >= 2 ? history[i - 2].high : history[i - 1].high;
-      currentSar = Math.max(currentSar, history[i - 1].high, prevHigh2);
-      if (history[i].high > currentSar) {
-        isUp = true;
-        currentSar = ep;
-        ep = history[i].high;
-        af = step;
-      } else if (history[i].low < ep) {
-        ep = history[i].low;
-        af = Math.min(af + step, maxStep);
-      }
-    }
-    sar[i] = currentSar;
-    trend[i] = isUp ? "up" : "down";
-  }
-  return { sar, trend };
-}
-
-// --- Momentum ---
-
-function calcStochastic(history, period = 14, smoothK = 3, smoothD = 3) {
-  const n = history.length;
-  const rawK = new Array(n).fill(null);
-  for (let i = period - 1; i < n; i++) {
-    const windowSlice = history.slice(i - period + 1, i + 1);
-    const highestHigh = Math.max(...windowSlice.map((h) => h.high));
-    const lowestLow = Math.min(...windowSlice.map((h) => h.low));
-    rawK[i] = highestHigh === lowestLow ? 50 : ((history[i].close - lowestLow) / (highestHigh - lowestLow)) * 100;
-  }
-  // Lissage SMA sur les valeurs déjà valides uniquement (0 en placeholder avant, retiré après).
-  const kFilled = calcSMA(rawK.map((v) => (v == null ? 0 : v)), smoothK).map((v, i) => (rawK[i] == null ? null : v));
-  const dFilled = calcSMA(kFilled.map((v) => (v == null ? 0 : v)), smoothD).map((v, i) => (kFilled[i] == null ? null : v));
-  return { k: kFilled, d: dFilled };
-}
-
-function calcWilliamsR(history, period = 14) {
-  const n = history.length;
-  const out = new Array(n).fill(null);
-  for (let i = period - 1; i < n; i++) {
-    const windowSlice = history.slice(i - period + 1, i + 1);
-    const highestHigh = Math.max(...windowSlice.map((h) => h.high));
-    const lowestLow = Math.min(...windowSlice.map((h) => h.low));
-    out[i] = highestHigh === lowestLow ? -50 : ((highestHigh - history[i].close) / (highestHigh - lowestLow)) * -100;
-  }
-  return out;
-}
-
-function calcCCI(history, period = 20) {
-  const n = history.length;
-  const typicalPrices = history.map((h) => (h.high + h.low + h.close) / 3);
-  const out = new Array(n).fill(null);
-  for (let i = period - 1; i < n; i++) {
-    const windowSlice = typicalPrices.slice(i - period + 1, i + 1);
-    const sma = windowSlice.reduce((a, b) => a + b, 0) / period;
-    const meanDev = windowSlice.reduce((a, b) => a + Math.abs(b - sma), 0) / period;
-    out[i] = meanDev === 0 ? 0 : (typicalPrices[i] - sma) / (0.015 * meanDev);
-  }
-  return out;
-}
-
-function calcROC(closes, period = 12) {
-  const n = closes.length;
-  const out = new Array(n).fill(null);
-  for (let i = period; i < n; i++) out[i] = ((closes[i] - closes[i - period]) / closes[i - period]) * 100;
-  return out;
-}
-
-// True Strength Index (double lissage EMA du momentum, 25/13 par défaut).
-function calcTSI(closes, longPeriod = 25, shortPeriod = 13) {
-  const n = closes.length;
-  const momentum = new Array(n).fill(0);
-  for (let i = 1; i < n; i++) momentum[i] = closes[i] - closes[i - 1];
-  const emaMomentumDouble = calcEMA(calcEMA(momentum, longPeriod), shortPeriod);
-  const absMomentum = momentum.map((m) => Math.abs(m));
-  const emaAbsDouble = calcEMA(calcEMA(absMomentum, longPeriod), shortPeriod);
-  return emaMomentumDouble.map((v, i) => (emaAbsDouble[i] ? (100 * v) / emaAbsDouble[i] : null));
-}
-
-// Awesome Oscillator = SMA5(prix médian) − SMA34(prix médian).
-function calcAwesomeOscillator(history) {
-  const median = history.map((h) => (h.high + h.low) / 2);
-  const sma5 = calcSMA(median, 5);
-  const sma34 = calcSMA(median, 34);
-  return median.map((_, i) => (sma5[i] != null && sma34[i] != null ? sma5[i] - sma34[i] : null));
-}
-
-// --- Volatility ---
-
-function calcBollingerBands(closes, period = 20, stdDevMult = 2) {
-  const n = closes.length;
-  const middle = calcSMA(closes, period);
-  const upper = new Array(n).fill(null);
-  const lower = new Array(n).fill(null);
-  for (let i = period - 1; i < n; i++) {
-    const windowSlice = closes.slice(i - period + 1, i + 1);
-    const mean = middle[i];
-    const variance = windowSlice.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / period;
-    const sd = Math.sqrt(variance);
-    upper[i] = mean + stdDevMult * sd;
-    lower[i] = mean - stdDevMult * sd;
-  }
-  return { upper, middle, lower };
-}
-
-function calcKeltnerChannels(history, closes, period = 20, atrMult = 2) {
-  const middle = calcEMA(closes, period);
-  const atr = calcATR(history, period);
-  return {
-    upper: middle.map((m, i) => (atr[i] != null ? m + atrMult * atr[i] : null)),
-    middle,
-    lower: middle.map((m, i) => (atr[i] != null ? m - atrMult * atr[i] : null)),
-  };
-}
-
-function calcStdDev(closes, period = 20) {
-  const n = closes.length;
-  const out = new Array(n).fill(null);
-  for (let i = period - 1; i < n; i++) {
-    const windowSlice = closes.slice(i - period + 1, i + 1);
-    const mean = windowSlice.reduce((a, b) => a + b, 0) / period;
-    const variance = windowSlice.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / period;
-    out[i] = Math.sqrt(variance);
-  }
-  return out;
-}
-
-// Choppiness Index : >61.8 = marché en range (pas de tendance fiable),
-// <38.2 = marché directionnel. Entre les deux : zone de transition.
-function calcChoppinessIndex(history, period = 14) {
-  const n = history.length;
-  const tr = calcTrueRange(history);
-  const out = new Array(n).fill(null);
-  for (let i = period - 1; i < n; i++) {
-    const trSum = tr.slice(i - period + 1, i + 1).reduce((a, b) => a + b, 0);
-    const windowSlice = history.slice(i - period + 1, i + 1);
-    const highestHigh = Math.max(...windowSlice.map((h) => h.high));
-    const lowestLow = Math.min(...windowSlice.map((h) => h.low));
-    const range = highestHigh - lowestLow;
-    out[i] = range === 0 ? 0 : (100 * Math.log10(trSum / range)) / Math.log10(period);
-  }
-  return out;
-}
-
-function classifyMarketRegime(adxVal, choppinessVal) {
-  if (choppinessVal != null && choppinessVal > 61.8) return "range";
-  if (adxVal != null && adxVal > 25) return "tendance";
-  return "transition";
-}
-
-// ==================================================================
-// PASS 2 — Pivot Points & Fibonacci (niveaux de Support/Résistance avancés)
-// Les pivots sont calculés à partir de la DERNIÈRE bougie complète de
-// l'historique (H/L/C — et O pour DeMark) : ce sont donc les niveaux
-// projetés pour la prochaine séance, comme sur un terminal de trading.
-// Les niveaux Fibonacci sont calculés sur le dernier swing détecté par
-// detectMarketStructure (swing low <-> swing high), pas sur tout
-// l'historique : ça reste pertinent tant que ce swing est le mouvement
-// dominant en cours.
-// ==================================================================
-
-// Pivot Points "Standard" (classique/floor trader).
-function calcPivotStandard(h, l, c) {
-  const pp = (h + l + c) / 3;
-  return {
-    pp,
-    r1: 2 * pp - l,
-    s1: 2 * pp - h,
-    r2: pp + (h - l),
-    s2: pp - (h - l),
-    r3: h + 2 * (pp - l),
-    s3: l - 2 * (h - pp),
-  };
-}
-
-// Pivot Points "Fibonacci" : mêmes PP que le standard, mais les
-// écartements R/S utilisent les ratios de Fibonacci (0.382/0.618/1.0)
-// plutôt que la géométrie du floor trader.
-function calcPivotFibonacci(h, l, c) {
-  const pp = (h + l + c) / 3;
-  const range = h - l;
-  return {
-    pp,
-    r1: pp + 0.382 * range,
-    s1: pp - 0.382 * range,
-    r2: pp + 0.618 * range,
-    s2: pp - 0.618 * range,
-    r3: pp + range,
-    s3: pp - range,
-  };
-}
-
-// Pivot Points "Camarilla" : niveaux resserrés autour de la clôture,
-// pensés pour du intraday (R3/S3 = zones de retournement probables,
-// R4/S4 = zones de breakout).
-function calcPivotCamarilla(h, l, c) {
-  const range = h - l;
-  return {
-    pp: c,
-    r1: c + (range * 1.1) / 12,
-    s1: c - (range * 1.1) / 12,
-    r2: c + (range * 1.1) / 6,
-    s2: c - (range * 1.1) / 6,
-    r3: c + (range * 1.1) / 4,
-    s3: c - (range * 1.1) / 4,
-    r4: c + (range * 1.1) / 2,
-    s4: c - (range * 1.1) / 2,
-  };
-}
-
-// Pivot Points "Woodie" : donne plus de poids à la clôture qu'à
-// l'ouverture/l'amplitude, censé mieux coller aux marchés qui gappent.
-function calcPivotWoodie(h, l, c) {
-  const pp = (h + l + 2 * c) / 4;
-  return {
-    pp,
-    r1: 2 * pp - l,
-    s1: 2 * pp - h,
-    r2: pp + (h - l),
-    s2: pp - (h - l),
-  };
-}
-
-// Pivot "DeMark" : asymétrique, dépend de la position de la clôture par
-// rapport à l'ouverture. Nécessite un "open" — approximé pour les cryptos
-// (clôture de la veille), voir fetchCoinGeckoHistory.
-function calcPivotDeMark(h, l, c, o) {
-  let x;
-  if (c < o) x = h + 2 * l + c;
-  else if (c > o) x = 2 * h + l + c;
-  else x = h + l + 2 * c;
-  const pp = x / 4;
-  return {
-    pp,
-    r1: x / 2 - l,
-    s1: x / 2 - h,
-  };
-}
-
-function calcAllPivots(history, lastIdx) {
-  const last = history[lastIdx];
-  const { high: h, low: l, close: c } = last;
-  const o = last.open != null ? last.open : c;
-  return {
-    standard: calcPivotStandard(h, l, c),
-    fibonacci: calcPivotFibonacci(h, l, c),
-    camarilla: calcPivotCamarilla(h, l, c),
-    woodie: calcPivotWoodie(h, l, c),
-    demark: calcPivotDeMark(h, l, c, o),
-  };
-}
-
-// Retracements de Fibonacci entre un swing low et un swing high : niveaux
-// classiques utilisés comme zones de support/résistance potentielles à
-// l'intérieur du swing.
-function calcFibonacciRetracement(low, high) {
-  const range = high - low;
-  return {
-    "0.0": high,
-    "0.236": high - 0.236 * range,
-    "0.382": high - 0.382 * range,
-    "0.5": high - 0.5 * range,
-    "0.618": high - 0.618 * range,
-    "0.786": high - 0.786 * range,
-    "1.0": low,
-  };
-}
-
-// Extensions de Fibonacci au-delà du swing : cibles de continuation si
-// la tendance du swing se poursuit (haussier = extension au-dessus du
-// high, baissier = extension en-dessous du low).
-function calcFibonacciExtension(low, high, direction) {
-  const range = high - low;
-  if (direction === "haussier") {
-    return {
-      "1.272": high + 0.272 * range,
-      "1.618": high + 0.618 * range,
-      "2.0": high + range,
-    };
-  }
-  return {
-    "1.272": low - 0.272 * range,
-    "1.618": low - 0.618 * range,
-    "2.0": low - range,
-  };
-}
-
-// ==================================================================
-// PASS 3 — Entry Algos & Risk/Reward
-// Ces fonctions ne votent PAS dans le verdict haussier/baissier/mitigé :
-// elles répondent à une question différente ("où/quand entrer si je suis
-// déjà d'accord avec le biais directionnel"), pas "quel est le biais".
-// Affichées comme information, pas comme signal supplémentaire.
-// ==================================================================
-
-// Z-score de la clôture par rapport à sa moyenne/écart-type glissants
-// (période 20 par défaut) : base du signal Mean Reversion.
-function calcZScore(closes, period = 20) {
-  const sma = calcSMA(closes, period);
-  const std = calcStdDev(closes, period);
-  return closes.map((c, i) => (sma[i] != null && std[i] ? (c - sma[i]) / std[i] : null));
-}
-
-// Breakout + Retest : le prix a cassé un niveau clé de la structure
-// (résistance en haussier, support en baissier) dans les `lookback`
-// dernières bougies, et se retrouve maintenant à moins de 1.5% de ce
-// niveau — configuration classique d'entrée sur retour au niveau cassé.
-function detectBreakoutRetest(history, structure, lookback = 10) {
-  if (!structure.resistance || !structure.support || structure.regime === "range") return { active: false };
-  const level = structure.regime === "haussier" ? structure.resistance : structure.support;
-  const recentBars = history.slice(-lookback, -1); // exclut la bougie courante
-  const broke =
-    structure.regime === "haussier"
-      ? recentBars.some((h) => h.close > level)
-      : recentBars.some((h) => h.close < level);
-  if (!broke) return { active: false };
-  const currentPrice = history[history.length - 1].close;
-  const distancePct = (Math.abs(currentPrice - level) / level) * 100;
-  return { active: distancePct < 1.5, level, distancePct, direction: structure.regime };
-}
-
-// Pullback Entry : dans une tendance établie, le prix est revenu tout
-// près de l'EMA20 sans l'avoir franchie dans le sens contraire — repli
-// classique avant une reprise de tendance.
-function detectPullback(currentPrice, ema20, trendDirection) {
-  if (ema20 == null || !trendDirection || trendDirection === "range" || trendDirection === "indéterminé") {
-    return { active: false };
-  }
-  const distancePct = (Math.abs(currentPrice - ema20) / ema20) * 100;
-  const nearEma = distancePct < 1.0;
-  const aligned = trendDirection === "haussier" ? currentPrice >= ema20 * 0.99 : currentPrice <= ema20 * 1.01;
-  return { active: nearEma && aligned, distancePct, ema20 };
-}
-
-// Mean Reversion (Z-score) : |z| > 2 = extension statistique significative
-// par rapport à la moyenne 20 périodes — pari sur un retour vers la
-// moyenne, donc SIGNAL OPPOSÉ à la direction de l'extension.
-function detectMeanReversion(zScoreLast) {
-  if (zScoreLast == null) return { active: false, zScore: null };
-  if (zScoreLast > 2) return { active: true, direction: "baissier", zScore: zScoreLast };
-  if (zScoreLast < -2) return { active: true, direction: "haussier", zScore: zScoreLast };
-  return { active: false, zScore: zScoreLast };
-}
-
-// Ratio Risque/Récompense explicite : distance entrée→stop vs entrée→cible.
-function calcRiskReward(entry, stop, target) {
-  if (entry == null || stop == null || target == null) return null;
-  const risk = Math.abs(entry - stop);
-  const reward = Math.abs(target - entry);
-  if (risk === 0) return null;
-  return { risk, reward, ratio: reward / risk };
-}
-
-// Chandelier Exit (Chuck LeBeau) : stop qui "suit" le prix, basé sur le plus
-// haut/plus bas glissant sur `period` bougies, moins/plus un multiple d'ATR.
-// Valeurs standard : période 22, multiplicateur 3. Contrairement au stop
-// structurel (dernier swing figé), il se resserre à chaque nouvelle bougie.
-function calcChandelierExit(history, period = 22, multiplier = 3) {
-  const atrSeries = calcATR(history, period);
-  const n = history.length;
-  const long = new Array(n).fill(null);
-  const short = new Array(n).fill(null);
-  for (let i = 0; i < n; i++) {
-    const atr = atrSeries[i];
-    if (atr == null) continue;
-    const start = Math.max(0, i - period + 1);
-    const windowSlice = history.slice(start, i + 1);
-    const highestHigh = Math.max(...windowSlice.map((h) => h.high));
-    const lowestLow = Math.min(...windowSlice.map((h) => h.low));
-    long[i] = highestHigh - multiplier * atr;
-    short[i] = lowestLow + multiplier * atr;
-  }
-  return { long, short };
-}
-
-// Trailing Stop ATR : le stop suit le prix mais ne peut jamais reculer
-// (ratchet à sens unique). `prevStop` = stop actuel avant recalcul (le stop
-// initial au premier appel). À utiliser dans le Calculateur une fois en
-// position, en resaisissant le prix actuel au fil du temps.
-function calcTrailingStopATR(currentPrice, atr, direction, multiplier = 3, prevStop = null) {
-  if (currentPrice == null || atr == null) return prevStop;
-  const candidate = direction === "haussier" ? currentPrice - multiplier * atr : currentPrice + multiplier * atr;
-  if (prevStop == null) return candidate;
-  return direction === "haussier" ? Math.max(prevStop, candidate) : Math.min(prevStop, candidate);
-}
-
-// Break-even : dès que le trade atteint +1R (gain = distance initialement
-// risquée), on remonte le stop au prix d'entrée (+ buffer optionnel pour
-// couvrir les frais/spread). Ne fait aucune hypothèse sur le futur : ne
-// répond qu'à "est-ce que +1R est déjà atteint MAINTENANT".
-function checkBreakEven(entry, stop, currentPrice, direction, buffer = 0) {
-  if (entry == null || stop == null || currentPrice == null) return { triggered: false, rMultiple: null };
-  const riskDistance = Math.abs(entry - stop);
-  if (riskDistance === 0) return { triggered: false, rMultiple: null };
-  const gained = direction === "haussier" ? currentPrice - entry : entry - currentPrice;
-  const rMultiple = gained / riskDistance;
-  const triggered = rMultiple >= 1;
-  const newStop = direction === "haussier" ? entry + buffer : entry - buffer;
-  return { triggered, rMultiple, newStop: triggered ? newStop : stop };
-}
-
-// Cibles en multiples de R (1R = distance risquée entrée→stop). Le palier
-// classique 1R/2R/3R/4R permet de raisonner en "combien de fois mon risque
-// initial" plutôt qu'en niveau de prix absolu.
-function calcRMultipleTargets(entry, stop, direction) {
-  if (entry == null || stop == null) return null;
-  const risk = Math.abs(entry - stop);
-  if (risk === 0) return null;
-  const sign = direction === "haussier" ? 1 : -1;
-  return {
-    r1: entry + sign * risk * 1,
-    r2: entry + sign * risk * 2,
-    r3: entry + sign * risk * 3,
-    r4: entry + sign * risk * 4,
-  };
-}
-
-// Take Profit basé sur l'ATR : utile en l'absence de niveau structurel
-// proche (résistance/support trop loin ou inexistant).
-function calcATRTarget(entry, atr, direction, multiplier = 2) {
-  if (entry == null || atr == null) return null;
-  return direction === "haussier" ? entry + multiplier * atr : entry - multiplier * atr;
-}
-
-// Take Profit partiel : sort la position par paliers de R (1R/2R/3R par
-// défaut, 30/30/40%) plutôt que tout d'un coup sur une seule cible —
-// sécurise du gain tôt tout en laissant courir une partie de la position.
-function calcPartialTakeProfit(
-  entry,
-  stop,
-  direction,
-  quantity,
-  tiers = [
-    { rMultiple: 1, pct: 30 },
-    { rMultiple: 2, pct: 30 },
-    { rMultiple: 3, pct: 40 },
-  ]
-) {
-  if (entry == null || stop == null || quantity == null) return null;
-  const risk = Math.abs(entry - stop);
-  if (risk === 0) return null;
-  const sign = direction === "haussier" ? 1 : -1;
-  return tiers.map((t) => {
-    const price = entry + sign * risk * t.rMultiple;
-    const qty = quantity * (t.pct / 100);
-    const gain = qty * risk * t.rMultiple;
-    return { ...t, price, qty, gain };
-  });
 }
 
 // DMI / ADX façon Wilder.
@@ -1074,75 +478,8 @@ async function runMarketAnalysis(type, query) {
   const rsi = calcRSI(closes, 14)[lastIdx];
   const atr = calcATR(history, 14)[lastIdx];
 
-  // ---- Pass 1 : nouveaux indicateurs (Trend / Momentum / Volatility) ----
-  const smaLast = calcSMA(closes, 50)[lastIdx];
-  const hmaSeries = calcHMA(closes, 20);
-  const hmaLast = hmaSeries[lastIdx];
-  const hmaPrev = hmaSeries[lastIdx - 1];
-
-  const { macdLine, signalLine, histogram } = calcMACD(closes);
-  const macdLast = macdLine[lastIdx];
-  const macdSignalLast = signalLine[lastIdx];
-  const macdHistLast = histogram[lastIdx];
-
-  const supertrend = calcSupertrend(history, 10, 3);
-  const supertrendLast = supertrend.trend[lastIdx];
-
-  const aroon = calcAroon(history, 25);
-  const aroonUpLast = aroon.aroonUp[lastIdx];
-  const aroonDownLast = aroon.aroonDown[lastIdx];
-
-  const psar = calcParabolicSAR(history);
-  const psarLast = psar.sar[lastIdx];
-
-  const stochastic = calcStochastic(history);
-  const stochKLast = stochastic.k[lastIdx];
-  const stochDLast = stochastic.d[lastIdx];
-
-  const williamsRLast = calcWilliamsR(history)[lastIdx];
-  const cciLast = calcCCI(history)[lastIdx];
-  const rocLast = calcROC(closes)[lastIdx];
-  const tsiLast = calcTSI(closes)[lastIdx];
-  const aoSeries = calcAwesomeOscillator(history);
-  const aoLast = aoSeries[lastIdx];
-  const aoPrev = aoSeries[lastIdx - 1];
-
-  const bb = calcBollingerBands(closes);
-  const bbUpperLast = bb.upper[lastIdx];
-  const bbLowerLast = bb.lower[lastIdx];
-
-  const keltner = calcKeltnerChannels(history, closes);
-  const keltnerUpperLast = keltner.upper[lastIdx];
-  const keltnerLowerLast = keltner.lower[lastIdx];
-
-  const stdDevLast = calcStdDev(closes)[lastIdx];
-  const choppinessLast = calcChoppinessIndex(history)[lastIdx];
-  const marketRegime = classifyMarketRegime(adxLast, choppinessLast);
-
-  // ---- Pass 2 : Pivot Points & Fibonacci ----
-  const pivots = calcAllPivots(history, lastIdx);
-  const fibRetracement =
-    structure.support != null && structure.resistance != null
-      ? calcFibonacciRetracement(structure.support, structure.resistance)
-      : null;
-  const fibExtension =
-    structure.support != null && structure.resistance != null && structure.regime !== "range"
-      ? calcFibonacciExtension(structure.support, structure.resistance, structure.regime)
-      : null;
-
-  const atrSeriesAll = calcATR(history, 14).filter((v) => v != null);
-  const atrAvg = atrSeriesAll.length ? atrSeriesAll.reduce((a, b) => a + b, 0) / atrSeriesAll.length : null;
-  const volRegime =
-    atrAvg != null && atr != null
-      ? atr > atrAvg * 1.3
-        ? "élevée"
-        : atr < atrAvg * 0.7
-        ? "faible"
-        : "normale"
-      : null;
-
   // --- Vote multi-facteurs : chaque brique contribue 1 point (0.5 pour un
-  // signal de confirmation secondaire) au camp haussier ou baissier. ---
+  // BOS de confirmation) au camp haussier ou baissier. ---
   let bull = 0, bear = 0;
 
   if (ema20 != null && ema50 != null) {
@@ -1176,41 +513,6 @@ async function runMarketAnalysis(type, query) {
   if (news?.label === "positif") bull += 1;
   else if (news?.label === "négatif") bear += 1;
 
-  // MACD : croisement ligne MACD / ligne signal, confirmé par l'histogramme.
-  if (macdLast != null && macdSignalLast != null) {
-    if (macdLast > macdSignalLast && macdHistLast > 0) bull += 1;
-    else if (macdLast < macdSignalLast && macdHistLast < 0) bear += 1;
-  }
-
-  // Supertrend : direction de la tendance.
-  if (supertrendLast === "up") bull += 1;
-  else if (supertrendLast === "down") bear += 1;
-
-  // Signaux de confirmation secondaires (poids réduit, pour ne pas noyer
-  // les signaux principaux ci-dessus) : SAR, Aroon, CCI, pente de la HMA.
-  if (psarLast != null) {
-    if (currentPrice > psarLast) bull += 0.5;
-    else bear += 0.5;
-  }
-  if (aroonUpLast != null && aroonDownLast != null) {
-    if (aroonUpLast > 70 && aroonUpLast > aroonDownLast) bull += 0.5;
-    else if (aroonDownLast > 70 && aroonDownLast > aroonUpLast) bear += 0.5;
-  }
-  if (cciLast != null) {
-    if (cciLast > 100) bull += 0.5;
-    else if (cciLast < -100) bear += 0.5;
-  }
-  if (hmaLast != null && hmaPrev != null) {
-    if (hmaLast > hmaPrev) bull += 0.5;
-    else if (hmaLast < hmaPrev) bear += 0.5;
-  }
-  // Pivot Point standard : position du prix par rapport au pivot central,
-  // signal de confirmation secondaire au même titre que les briques ci-dessus.
-  if (pivots?.standard?.pp != null) {
-    if (currentPrice > pivots.standard.pp) bull += 0.5;
-    else if (currentPrice < pivots.standard.pp) bear += 0.5;
-  }
-
   let verdict = "mitigé";
   if (bull - bear >= 2) verdict = "haussier";
   else if (bear - bull >= 2) verdict = "baissier";
@@ -1221,62 +523,12 @@ async function runMarketAnalysis(type, query) {
   if (verdict === "haussier" && rsi != null && rsi > 75) verdict = "mitigé";
   if (verdict === "baissier" && rsi != null && rsi < 25) verdict = "mitigé";
 
-  // Stochastique : même logique de garde-fou que le RSI.
-  if (verdict === "haussier" && stochKLast != null && stochKLast > 80) verdict = "mitigé";
-  if (verdict === "baissier" && stochKLast != null && stochKLast < 20) verdict = "mitigé";
-
-  // Choppiness Index > 61.8 : marché en range, aucune tendance fiable —
-  // on neutralise le verdict quel que soit le score des autres briques.
-  if (choppinessLast != null && choppinessLast > 61.8) verdict = "mitigé";
-
   const support = structure.support;
   const resistance = structure.resistance;
   // Stop-loss basé sur la volatilité réelle (ATR) plutôt qu'un pourcentage
   // fixe : plus l'actif est volatil, plus le stop est éloigné de l'entrée.
   const atrStop = support != null && atr != null ? support - 1.2 * atr : null;
   const atrStopShort = resistance != null && atr != null ? resistance + 1.2 * atr : null;
-
-  // Chandelier Exit (22, 3) : alternative "suiveuse" au stop structurel,
-  // recalculée sur le plus haut/bas glissant plutôt que sur le dernier swing.
-  const chandelier = calcChandelierExit(history, 22, 3);
-  const chandelierStopLong = chandelier.long[lastIdx];
-  const chandelierStopShort = chandelier.short[lastIdx];
-
-  // Stop recommandé = le plus prudent des deux (le plus éloigné du prix),
-  // pour éviter un stop placé à l'intérieur du bruit normal du marché.
-  const stopCandidatesLong = [atrStop, chandelierStopLong].filter((v) => v != null);
-  const recommendedStopLong = stopCandidatesLong.length ? Math.min(...stopCandidatesLong) : null;
-  const stopCandidatesShort = [atrStopShort, chandelierStopShort].filter((v) => v != null);
-  const recommendedStopShort = stopCandidatesShort.length ? Math.max(...stopCandidatesShort) : null;
-
-  // ---- Pass 3 : Entry Algos & Risk/Reward ----
-  const zScoreLast = calcZScore(closes, 20)[lastIdx];
-  const breakoutRetest = detectBreakoutRetest(history, structure);
-  const pullback = detectPullback(currentPrice, ema20, structure.regime);
-  const meanReversion = detectMeanReversion(zScoreLast);
-
-  const riskReward =
-    structure.regime === "haussier"
-      ? calcRiskReward(currentPrice, recommendedStopLong, resistance)
-      : structure.regime === "baissier"
-      ? calcRiskReward(currentPrice, recommendedStopShort, support)
-      : null;
-
-  // Cibles Take Profit : paliers R-multiples (1R→4R) sur le stop recommandé,
-  // + une cible alternative basée sur l'ATR pour les cas sans niveau
-  // structurel exploitable. Calculées uniquement quand un biais net existe.
-  const rTargets =
-    structure.regime === "haussier"
-      ? calcRMultipleTargets(currentPrice, recommendedStopLong, "haussier")
-      : structure.regime === "baissier"
-      ? calcRMultipleTargets(currentPrice, recommendedStopShort, "baissier")
-      : null;
-  const atrTarget =
-    structure.regime === "haussier"
-      ? calcATRTarget(currentPrice, atr, "haussier", 2)
-      : structure.regime === "baissier"
-      ? calcATRTarget(currentPrice, atr, "baissier", 2)
-      : null;
 
   const trendLabel =
     ema20 != null && ema50 != null
@@ -1289,14 +541,6 @@ async function runMarketAnalysis(type, query) {
 
   const reasoning = [
     trendLabel && `EMA20/EMA50 : tendance ${trendLabel}`,
-    smaLast != null && `SMA(50) : $${smaLast.toFixed(2)} — prix ${currentPrice > smaLast ? "au-dessus" : "en-dessous"}`,
-    hmaLast != null &&
-      `HMA(20) : $${hmaLast.toFixed(2)}, pente ${hmaPrev != null ? (hmaLast > hmaPrev ? "haussière" : "baissière") : "n/a"}`,
-    macdLast != null &&
-      `MACD(12,26,9) : ligne ${macdLast.toFixed(2)} vs signal ${macdSignalLast.toFixed(2)}, histogramme ${macdHistLast > 0 ? "positif" : "négatif"}`,
-    supertrendLast && `Supertrend(10,3) : tendance ${supertrendLast === "up" ? "haussière" : "baissière"}`,
-    aroonUpLast != null && `Aroon(25) : Up ${aroonUpLast.toFixed(0)} / Down ${aroonDownLast.toFixed(0)}`,
-    psarLast != null && `Parabolic SAR : $${psarLast.toFixed(2)} (prix ${currentPrice > psarLast ? "au-dessus" : "en-dessous"})`,
     adxLast != null &&
       `ADX ${adxLast.toFixed(0)} (${adxLast > 20 ? "tendance significative" : "pas de tendance nette"}), +DI ${plusDILast?.toFixed(0)} / -DI ${minusDILast?.toFixed(0)}`,
     cloudTop != null
@@ -1306,48 +550,8 @@ async function runMarketAnalysis(type, query) {
     support != null && `Support (swing low) : $${support.toFixed(2)} — Résistance (swing high) : $${resistance.toFixed(2)}`,
     rsi != null &&
       `RSI(14) : ${rsi.toFixed(0)}${rsi > 75 ? " — suracheté, prudence" : rsi < 25 ? " — survendu, prudence" : ""}`,
-    stochKLast != null &&
-      `Stochastique(14,3,3) : %K ${stochKLast.toFixed(0)} / %D ${stochDLast != null ? stochDLast.toFixed(0) : "n/a"}${stochKLast > 80 ? " — suracheté" : stochKLast < 20 ? " — survendu" : ""}`,
-    williamsRLast != null &&
-      `Williams %R(14) : ${williamsRLast.toFixed(0)}${williamsRLast > -20 ? " — suracheté" : williamsRLast < -80 ? " — survendu" : ""}`,
-    cciLast != null &&
-      `CCI(20) : ${cciLast.toFixed(0)}${cciLast > 100 ? " — zone haussière extrême" : cciLast < -100 ? " — zone baissière extrême" : ""}`,
-    rocLast != null && `ROC(12) : ${rocLast > 0 ? "+" : ""}${rocLast.toFixed(1)}%`,
-    tsiLast != null && `TSI(25,13) : ${tsiLast.toFixed(0)}`,
-    aoLast != null &&
-      `Awesome Oscillator : ${aoLast > 0 ? "positif" : "négatif"}${aoPrev != null ? (aoLast > aoPrev ? ", en hausse" : ", en baisse") : ""}`,
-    bbUpperLast != null &&
-      `Bollinger Bands(20,2) : prix ${currentPrice > bbUpperLast ? "au-dessus de la bande haute" : currentPrice < bbLowerLast ? "en-dessous de la bande basse" : "dans le canal"} ($${bbLowerLast.toFixed(2)} – $${bbUpperLast.toFixed(2)})`,
-    keltnerUpperLast != null &&
-      `Keltner Channels(20, 2×ATR) : $${keltnerLowerLast.toFixed(2)} – $${keltnerUpperLast.toFixed(2)}`,
-    stdDevLast != null && `Écart-type(20) des clôtures : $${stdDevLast.toFixed(2)}`,
-    choppinessLast != null && `Choppiness Index(14) : ${choppinessLast.toFixed(0)}`,
-    `Régime de marché : ${marketRegime}${volRegime ? ` — volatilité ${volRegime}` : ""}`,
-    pivots?.standard != null &&
-      `Pivot Point (Standard) : $${pivots.standard.pp.toFixed(2)} — R1 $${pivots.standard.r1.toFixed(2)} / S1 $${pivots.standard.s1.toFixed(2)}, prix ${currentPrice > pivots.standard.pp ? "au-dessus" : "en-dessous"} du pivot`,
-    pivots?.camarilla != null &&
-      `Pivot Camarilla : R3 $${pivots.camarilla.r3.toFixed(2)} / S3 $${pivots.camarilla.s3.toFixed(2)} (zones de retournement intraday)`,
-    fibRetracement != null &&
-      `Retracements Fibonacci du dernier swing : 38,2% $${fibRetracement["0.382"].toFixed(2)} — 50% $${fibRetracement["0.5"].toFixed(2)} — 61,8% $${fibRetracement["0.618"].toFixed(2)}`,
-    fibExtension != null &&
-      `Extensions Fibonacci (cibles de continuation ${structure.regime}) : 127,2% $${fibExtension["1.272"].toFixed(2)} — 161,8% $${fibExtension["1.618"].toFixed(2)}`,
-    breakoutRetest?.active &&
-      `Breakout+Retest : cassure ${breakoutRetest.direction} de $${breakoutRetest.level.toFixed(2)} confirmée, retest en cours (${breakoutRetest.distancePct.toFixed(1)}% du niveau)`,
-    pullback?.active &&
-      `Pullback Entry : repli sur l'EMA20 ($${pullback.ema20.toFixed(2)}, ${pullback.distancePct.toFixed(1)}% d'écart) dans une tendance ${structure.regime}`,
-    meanReversion?.active &&
-      `Mean Reversion : Z-score ${meanReversion.zScore.toFixed(2)} — extension statistique, pari sur un retour ${meanReversion.direction}`,
-    riskReward != null &&
-      `Risk/Reward : 1:${riskReward.ratio.toFixed(1)} (risque $${riskReward.risk.toFixed(2)} pour un potentiel de $${riskReward.reward.toFixed(2)})`,
     atr != null &&
-      `ATR(14) : $${atr.toFixed(2)}${atrAvg != null ? ` (moyenne : $${atrAvg.toFixed(2)})` : ""}${type === "crypto" ? " — approximé en clôture-à-clôture faute d'OHLC gratuit" : ""}`,
-    (chandelierStopLong != null || chandelierStopShort != null) &&
-      `Chandelier Exit(22,3) : long $${chandelierStopLong?.toFixed(2)} / short $${chandelierStopShort?.toFixed(2)}`,
-    (recommendedStopLong != null || recommendedStopShort != null) &&
-      `Stop recommandé (le plus prudent entre ATR et Chandelier) : $${(structure.regime === "baissier" ? recommendedStopShort : recommendedStopLong)?.toFixed(2)}`,
-    rTargets != null &&
-      `Cibles R-multiples : 1R $${rTargets.r1.toFixed(2)} — 2R $${rTargets.r2.toFixed(2)} — 3R $${rTargets.r3.toFixed(2)}`,
-    atrTarget != null && `Cible ATR (×2) : $${atrTarget.toFixed(2)}`,
+      `ATR(14) : $${atr.toFixed(2)} (volatilité${type === "crypto" ? ", approximée en clôture-à-clôture faute d'OHLC gratuit" : ""})`,
     news
       ? `Actualités : ton ${news.label} sur ${news.articleCount} articles récents`
       : newsError
@@ -1355,98 +559,19 @@ async function runMarketAnalysis(type, query) {
       : "Actualités non incluses",
   ].filter(Boolean);
 
-    // ----------------------------------------------------------
-  // SENTINEL ENGINE V1
-  // Analyse de la qualité du setup
-  // ----------------------------------------------------------
-
-  const sentinel = calculateSentinelScore({
-    currentPrice,
-
-    // Structure
-    structure,
-
-    // Trend
-    ema20,
-    ema50,
-    adx: adxLast,
-    plusDI: plusDILast,
-    minusDI: minusDILast,
-
-    // Momentum
-    rsi,
-    macd: {
-      line: macdLast,
-      signal: macdSignalLast,
-      histogram: macdHistLast,
-    },
-
-    // Volatility
-    atr,
-    atrAvg,
-    volatilityRegime: volRegime,
-
-    // Levels
-    support,
-    resistance,
-    pivots,
-    fibRetracement,
-
-    // Entry
-    breakoutRetest,
-    pullback,
-    meanReversion,
-
-    // Risk
-    riskReward,
-
-    // Ancien moteur — conservé comme référence
-    verdict,
-  });
-
-  console.log("══════════════════════════════════════");
-  console.log("🛡️ SENTINEL ENGINE V1");
-  console.log("══════════════════════════════════════");
-  console.log("Symbol:", query.toUpperCase());
-  console.log("Sentinel Score:", sentinel.score);
-  console.log("Bias:", sentinel.bias);
-  console.log("Setup:", sentinel.setup);
-  console.log("Status:", sentinel.status);
-  console.log("Breakdown:", sentinel.breakdown);
-  console.log("Reasons:", sentinel.reasons);
-  console.log("Warnings:", sentinel.warnings);
-  console.log("══════════════════════════════════════");
-
-      return {
+  return {
     symbol: query.toUpperCase(),
     price: currentPrice,
     support,
     resistance,
     verdict,
     score: bull - bear,
-
-    // Nouveau moteur
-    sentinel,
-
     reasoning,
     news,
     atrStop,
     atrStopShort,
-    chandelierStopLong,
-    chandelierStopShort,
-    recommendedStopLong,
-    recommendedStopShort,
-    rTargets,
-    atrTarget,
-    pivots,
-    fibRetracement,
-    fibExtension,
-    breakoutRetest,
-    pullback,
-    meanReversion,
-    riskReward,
   };
-} // <-- IL MANQUAIT CETTE ACCOLADE
+}
 
 // ---------- UI: petit composant de tendance ----------
 function TrendBadge({ label, trend }) {
@@ -1836,102 +961,6 @@ function Dossier({ setTab, setPrefillCalc }) {
             ))}
           </div>
 
-          {dossier.pivots && (
-            <div style={{ marginBottom: 14, borderTop: `1px solid ${LINE}`, paddingTop: 10 }}>
-              <div style={{ fontSize: 11, color: MUTED, marginBottom: 8, textTransform: "uppercase" }}>
-                Pivot Points (Standard)
-              </div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, marginBottom: 12 }}>
-                <div style={{ background: NAVY, borderRadius: 8, padding: 8, textAlign: "center" }}>
-                  <div style={{ fontSize: 10, color: MUTED }}>S1</div>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: POS }}>${dossier.pivots.standard.s1.toFixed(2)}</div>
-                </div>
-                <div style={{ background: NAVY, borderRadius: 8, padding: 8, textAlign: "center" }}>
-                  <div style={{ fontSize: 10, color: MUTED }}>Pivot</div>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: ACCENT }}>${dossier.pivots.standard.pp.toFixed(2)}</div>
-                </div>
-                <div style={{ background: NAVY, borderRadius: 8, padding: 8, textAlign: "center" }}>
-                  <div style={{ fontSize: 10, color: MUTED }}>R1</div>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: NEG }}>${dossier.pivots.standard.r1.toFixed(2)}</div>
-                </div>
-              </div>
-
-              {dossier.fibRetracement && (
-                <>
-                  <div style={{ fontSize: 11, color: MUTED, marginBottom: 8, textTransform: "uppercase" }}>
-                    Retracements Fibonacci (dernier swing)
-                  </div>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: dossier.fibExtension ? 12 : 0 }}>
-                    {["0.236", "0.382", "0.5", "0.618", "0.786"].map((k) => (
-                      <div key={k} style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
-                        <span style={{ color: MUTED }}>{(parseFloat(k) * 100).toFixed(1)}%</span>
-                        <span style={{ color: TEXT, fontWeight: 600 }}>${dossier.fibRetracement[k].toFixed(2)}</span>
-                      </div>
-                    ))}
-                  </div>
-                </>
-              )}
-
-              {dossier.fibExtension && (
-                <>
-                  <div style={{ fontSize: 11, color: MUTED, marginBottom: 8, textTransform: "uppercase" }}>
-                    Extensions Fibonacci (cibles)
-                  </div>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                    {["1.272", "1.618", "2.0"].map((k) => (
-                      <div key={k} style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
-                        <span style={{ color: MUTED }}>{(parseFloat(k) * 100).toFixed(1)}%</span>
-                        <span style={{ color: ACCENT, fontWeight: 600 }}>${dossier.fibExtension[k].toFixed(2)}</span>
-                      </div>
-                    ))}
-                  </div>
-                </>
-              )}
-            </div>
-          )}
-
-          {(dossier.breakoutRetest?.active || dossier.pullback?.active || dossier.meanReversion?.active || dossier.riskReward) && (
-            <div style={{ marginBottom: 14, borderTop: `1px solid ${LINE}`, paddingTop: 10 }}>
-              <div style={{ fontSize: 11, color: MUTED, marginBottom: 8, textTransform: "uppercase" }}>
-                Setups d'entrée
-              </div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {dossier.breakoutRetest?.active && (
-                  <div style={{ background: NAVY, borderRadius: 8, padding: 10 }}>
-                    <div style={{ fontSize: 12, fontWeight: 700, color: ACCENT }}>Breakout + Retest</div>
-                    <div style={{ fontSize: 12, color: MUTED }}>
-                      Cassure {dossier.breakoutRetest.direction} de ${dossier.breakoutRetest.level.toFixed(2)}, retest à {dossier.breakoutRetest.distancePct.toFixed(1)}%
-                    </div>
-                  </div>
-                )}
-                {dossier.pullback?.active && (
-                  <div style={{ background: NAVY, borderRadius: 8, padding: 10 }}>
-                    <div style={{ fontSize: 12, fontWeight: 700, color: ACCENT }}>Pullback Entry</div>
-                    <div style={{ fontSize: 12, color: MUTED }}>
-                      Repli sur l'EMA20 (${dossier.pullback.ema20.toFixed(2)}, {dossier.pullback.distancePct.toFixed(1)}% d'écart)
-                    </div>
-                  </div>
-                )}
-                {dossier.meanReversion?.active && (
-                  <div style={{ background: NAVY, borderRadius: 8, padding: 10 }}>
-                    <div style={{ fontSize: 12, fontWeight: 700, color: ACCENT }}>Mean Reversion</div>
-                    <div style={{ fontSize: 12, color: MUTED }}>
-                      Z-score {dossier.meanReversion.zScore.toFixed(2)} — pari {dossier.meanReversion.direction} (contrarian)
-                    </div>
-                  </div>
-                )}
-                {dossier.riskReward && (
-                  <div style={{ background: NAVY, borderRadius: 8, padding: 10, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <span style={{ fontSize: 12, color: MUTED }}>Risk/Reward</span>
-                    <span style={{ fontSize: 15, fontWeight: 700, color: dossier.riskReward.ratio >= 2 ? POS : dossier.riskReward.ratio >= 1 ? MUTED : NEG }}>
-                      1:{dossier.riskReward.ratio.toFixed(1)}
-                    </span>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
           {dossier.news?.headlines?.length > 0 && (
             <div style={{ marginBottom: 14, borderTop: `1px solid ${LINE}`, paddingTop: 10 }}>
               <div style={{ fontSize: 11, color: MUTED, marginBottom: 6, textTransform: "uppercase" }}>Titres récents</div>
@@ -1951,8 +980,8 @@ function Dossier({ setTab, setPrefillCalc }) {
                       entry: dossier.price,
                       stop:
                         dossier.verdict === "baissier"
-                          ? dossier.recommendedStopShort ?? dossier.atrStopShort ?? dossier.resistance
-                          : dossier.recommendedStopLong ?? dossier.atrStop ?? dossier.support,
+                          ? dossier.atrStopShort ?? dossier.resistance
+                          : dossier.atrStop ?? dossier.support,
                     }
                   : { entry: dossier.price }
               );
@@ -2131,7 +1160,7 @@ function TopMarkets({ onSendToCalculator }) {
             // l'or/argent (pas d'historique gratuit), on n'envoie que le prix actuel.
             const buyPrice = hasLevels ? r.support : r.price;
             const sellPrice = hasLevels ? r.resistance : null;
-            const stopPrice = hasLevels ? r.recommendedStopLong ?? r.atrStop ?? buyPrice * 0.98 : null;
+            const stopPrice = hasLevels ? r.atrStop ?? buyPrice * 0.98 : null;
 
             return (
               <button
@@ -2230,10 +1259,6 @@ function Calculateur({ prefill }) {
   const [entry, setEntry] = useState(prefill?.entry?.toString() || "");
   const [stop, setStop] = useState(prefill?.stop?.toString() || "");
   const [takeProfit, setTakeProfit] = useState(prefill?.takeProfit?.toString() || "");
-  // Suivi de position une fois en trade : prix actuel + ATR (optionnel,
-  // copié depuis le Dossier) pour calculer break-even et trailing stop.
-  const [currentPrice, setCurrentPrice] = useState("");
-  const [liveAtr, setLiveAtr] = useState("");
 
   useEffect(() => {
     if (prefill?.entry) setEntry(prefill.entry.toString());
@@ -2262,17 +1287,6 @@ function Calculateur({ prefill }) {
   const gainAmount = valid && tp > 0 ? quantity * Math.abs(tp - e) : null;
   const gainDistance = valid && tp > 0 ? Math.abs(tp - e) : null;
   const gainDistancePct = valid && tp > 0 ? (gainDistance / e) * 100 : null;
-
-  // Suivi de position : direction déduite du stop (stop < entrée = long).
-  const direction = valid ? (s < e ? "haussier" : "baissier") : null;
-  const cp = parseFloat(currentPrice);
-  const atrVal = parseFloat(liveAtr);
-  const breakEven = valid && cp > 0 ? checkBreakEven(e, s, cp, direction) : null;
-  const trailingAtrStop = valid && cp > 0 && atrVal > 0 ? calcTrailingStopATR(cp, atrVal, direction, 3, s) : null;
-
-  // Take Profit par paliers 1R/2R/3R (30/30/40%), calculé sur la taille de
-  // position déjà déterminée plus haut (quantity).
-  const partialTP = valid ? calcPartialTakeProfit(e, s, direction, quantity) : null;
 
   return (
     <div>
@@ -2369,345 +1383,8 @@ function Calculateur({ prefill }) {
       ) : (
         <div style={{ fontSize: 12, color: MUTED, marginTop: 8 }}>Remplis montant, levier, entrée et stop-loss pour voir le calcul.</div>
       )}
-
-      {valid && partialTP && (
-        <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 16, marginTop: 12 }}>
-          <div style={{ fontSize: 12, color: ACCENT, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 10 }}>
-            Take Profit par paliers (1R / 2R / 3R)
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {partialTP.map((tier, i) => (
-              <div
-                key={i}
-                style={{
-                  background: NAVY,
-                  borderRadius: 8,
-                  padding: 10,
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                }}
-              >
-                <div>
-                  <div style={{ fontSize: 12, fontWeight: 700 }}>
-                    TP{i + 1} — {tier.rMultiple}R ({tier.pct}% de la position)
-                  </div>
-                  <div style={{ fontSize: 11, color: MUTED }}>Prix : {tier.price.toFixed(2)}</div>
-                </div>
-                <div style={{ fontSize: 14, fontWeight: 700, color: POS }}>+{tier.gain.toFixed(2)} €</div>
-              </div>
-            ))}
-          </div>
-          <div style={{ display: "flex", justifyContent: "space-between", marginTop: 10, paddingTop: 10, borderTop: `1px solid ${LINE}` }}>
-            <span style={{ fontSize: 13, color: MUTED }}>Gain total si les 3 paliers sont touchés</span>
-            <span style={{ fontSize: 15, fontWeight: 700, color: POS }}>
-              +{partialTP.reduce((sum, t) => sum + t.gain, 0).toFixed(2)} €
-            </span>
-          </div>
-        </div>
-      )}
-
-      {valid && (
-        <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 16, marginTop: 12 }}>
-          <div style={{ fontSize: 12, color: ACCENT, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 10 }}>
-            Gestion de la position (une fois en trade)
-          </div>
-          <CalcField label="Prix actuel" value={currentPrice} onChange={setCurrentPrice} placeholder="ex: 4380.00" />
-          <CalcField label="ATR actuel (optionnel — copie-le depuis le Dossier)" value={liveAtr} onChange={setLiveAtr} placeholder="ex: 45.30" />
-
-          {cp > 0 ? (
-            <div style={{ marginTop: 4 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
-                <span style={{ fontSize: 13, color: MUTED }}>Progression</span>
-                <span style={{ fontSize: 14, fontWeight: 700, color: breakEven?.rMultiple >= 0 ? POS : NEG }}>
-                  {breakEven?.rMultiple != null ? `${breakEven.rMultiple.toFixed(2)}R` : "—"}
-                </span>
-              </div>
-              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: atrVal > 0 ? 8 : 0 }}>
-                <span style={{ fontSize: 13, color: MUTED }}>Break-even (+1R)</span>
-                <span style={{ fontSize: 13, fontWeight: 700, color: breakEven?.triggered ? POS : MUTED }}>
-                  {breakEven?.triggered ? `Atteint — remonte le stop à ${breakEven.newStop.toFixed(2)}` : "Pas encore atteint"}
-                </span>
-              </div>
-              {atrVal > 0 && (
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
-                  <span style={{ fontSize: 13, color: MUTED }}>Trailing stop ATR (×3)</span>
-                  <span style={{ fontSize: 13, fontWeight: 700, color: ACCENT }}>
-                    {trailingAtrStop != null ? trailingAtrStop.toFixed(2) : "—"}
-                  </span>
-                </div>
-              )}
-            </div>
-          ) : (
-            <div style={{ fontSize: 12, color: MUTED }}>
-              Renseigne le prix actuel pour voir ta progression en R et le stop suggéré.
-            </div>
-          )}
-        </div>
-      )}
     </div>
   );
-}
-
-// ================= Journal de trades =================
-const StatCell = ({ label, value, color }) => (
-  <div style={{ background: NAVY, borderRadius: 8, padding: 10 }}>
-    <div style={{ fontSize: 10, color: MUTED, marginBottom: 2 }}>{label}</div>
-    <div style={{ fontSize: 15, fontWeight: 700, color: color || TEXT }}>{value}</div>
-  </div>
-);
-
-function fmt(n, digits = 2) {
-  if (n == null || Number.isNaN(n)) return "—";
-  if (!Number.isFinite(n)) return "∞";
-  return n.toFixed(digits);
-}
-
-function JournalTab() {
-  const [trades, setTrades] = useState([]);
-  const [form, setForm] = useState({
-    symbol: "",
-    direction: "haussier",
-    entry: "",
-    stop: "",
-    exit: "",
-    quantity: "",
-    date: new Date().toISOString().slice(0, 10),
-  });
-  const [monteCarlo, setMonteCarlo] = useState(null);
-  const [mcLoading, setMcLoading] = useState(false);
-
-  useEffect(() => {
-    setTrades(getTrades());
-  }, []);
-
-  const stats = computeStats(trades);
-
-  const submit = (e) => {
-    e.preventDefault();
-    if (!form.symbol || !form.entry || !form.stop || !form.exit) return;
-    const updated = addTrade({
-      symbol: form.symbol.toUpperCase(),
-      direction: form.direction,
-      entry: parseFloat(form.entry),
-      stop: parseFloat(form.stop),
-      exit: parseFloat(form.exit),
-      quantity: form.quantity ? parseFloat(form.quantity) : null,
-      date: form.date,
-    });
-    setTrades(updated);
-    setForm({ ...form, symbol: "", entry: "", stop: "", exit: "", quantity: "" });
-    setMonteCarlo(null); // les stats ont changé, on invalide l'ancienne simulation
-  };
-
-  const remove = (id) => {
-    setTrades(deleteTrade(id));
-    setMonteCarlo(null);
-  };
-
-  const runMonteCarlo = () => {
-    setMcLoading(true);
-    // setTimeout pour laisser le loader s'afficher — 1000 simulations sur
-    // peu de trades est quasi instantané mais ça évite un flash bizarre.
-    setTimeout(() => {
-      setMonteCarlo(monteCarloSimulation(trades, 1000, 20, 10));
-      setMcLoading(false);
-    }, 50);
-  };
-
-  return (
-    <div>
-      <div style={{ fontSize: 13, color: MUTED, marginBottom: 16 }}>
-        Journal de tes trades clôturés + statistiques calculées dessus (Win Rate, Expectancy,
-        Profit Factor, Drawdown, Sharpe/Sortino/Calmar). Stocké uniquement dans ton navigateur.
-      </div>
-
-      <form onSubmit={submit} style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 16, marginBottom: 16 }}>
-        <div style={{ fontSize: 12, color: ACCENT, fontWeight: 700, textTransform: "uppercase", marginBottom: 10 }}>
-          Ajouter un trade clôturé
-        </div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
-          <input
-            value={form.symbol}
-            onChange={(e) => setForm({ ...form, symbol: e.target.value })}
-            placeholder="Symbole (ex: BTC)"
-            style={{ background: NAVY, border: `1px solid ${LINE}`, borderRadius: 8, padding: "9px 10px", color: TEXT, fontSize: 13 }}
-          />
-          <select
-            value={form.direction}
-            onChange={(e) => setForm({ ...form, direction: e.target.value })}
-            style={{ background: NAVY, border: `1px solid ${LINE}`, borderRadius: 8, padding: "9px 10px", color: TEXT, fontSize: 13 }}
-          >
-            <option value="haussier">Long</option>
-            <option value="baissier">Short</option>
-          </select>
-        </div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 8 }}>
-          <input
-            value={form.entry}
-            onChange={(e) => setForm({ ...form, entry: e.target.value })}
-            placeholder="Entrée"
-            inputMode="decimal"
-            style={{ background: NAVY, border: `1px solid ${LINE}`, borderRadius: 8, padding: "9px 10px", color: TEXT, fontSize: 13 }}
-          />
-          <input
-            value={form.stop}
-            onChange={(e) => setForm({ ...form, stop: e.target.value })}
-            placeholder="Stop"
-            inputMode="decimal"
-            style={{ background: NAVY, border: `1px solid ${LINE}`, borderRadius: 8, padding: "9px 10px", color: TEXT, fontSize: 13 }}
-          />
-          <input
-            value={form.exit}
-            onChange={(e) => setForm({ ...form, exit: e.target.value })}
-            placeholder="Sortie"
-            inputMode="decimal"
-            style={{ background: NAVY, border: `1px solid ${LINE}`, borderRadius: 8, padding: "9px 10px", color: TEXT, fontSize: 13 }}
-          />
-        </div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
-          <input
-            value={form.quantity}
-            onChange={(e) => setForm({ ...form, quantity: e.target.value })}
-            placeholder="Quantité (optionnel)"
-            inputMode="decimal"
-            style={{ background: NAVY, border: `1px solid ${LINE}`, borderRadius: 8, padding: "9px 10px", color: TEXT, fontSize: 13 }}
-          />
-          <input
-            type="date"
-            value={form.date}
-            onChange={(e) => setForm({ ...form, date: e.target.value })}
-            style={{ background: NAVY, border: `1px solid ${LINE}`, borderRadius: 8, padding: "9px 10px", color: TEXT, fontSize: 13 }}
-          />
-        </div>
-        <button
-          type="submit"
-          style={{ width: "100%", background: ACCENT, border: "none", borderRadius: 8, padding: "10px 0", color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer" }}
-        >
-          Ajouter au journal
-        </button>
-      </form>
-
-      {stats.count > 0 ? (
-        <>
-          <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 16, marginBottom: 16 }}>
-            <div style={{ fontSize: 12, color: ACCENT, fontWeight: 700, textTransform: "uppercase", marginBottom: 10 }}>
-              Statistiques ({stats.count} trades clôturés)
-            </div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 8 }}>
-              <StatCell label="Win Rate" value={`${fmt(stats.winRate, 0)}%`} color={stats.winRate >= 50 ? POS : NEG} />
-              <StatCell label="Profit Factor" value={fmt(stats.profitFactor)} color={stats.profitFactor >= 1 ? POS : NEG} />
-              <StatCell label="Expectancy" value={`${fmt(stats.expectancy)} €`} color={stats.expectancy >= 0 ? POS : NEG} />
-            </div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 8 }}>
-              <StatCell label="Expectancy (R)" value={`${fmt(stats.expectancyR)}R`} color={stats.expectancyR >= 0 ? POS : NEG} />
-              <StatCell label="Gain moyen" value={`${fmt(stats.avgWin)} €`} color={POS} />
-              <StatCell label="Perte moyenne" value={`${fmt(stats.avgLoss)} €`} color={NEG} />
-            </div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 8 }}>
-              <StatCell label="Max Drawdown" value={`${fmt(stats.maxDrawdown)} € (${fmt(stats.maxDrawdownPct, 0)}%)`} color={NEG} />
-              <StatCell label="Recovery Factor" value={fmt(stats.recoveryFactor)} />
-              <StatCell label="Profit net" value={`${fmt(stats.netProfit)} €`} color={stats.netProfit >= 0 ? POS : NEG} />
-            </div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
-              <StatCell label="Sharpe" value={fmt(stats.sharpe)} />
-              <StatCell label="Sortino" value={fmt(stats.sortino)} />
-              <StatCell label="Calmar" value={fmt(stats.calmar)} />
-            </div>
-          </div>
-
-          <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 16, marginBottom: 16 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-              <div style={{ fontSize: 12, color: ACCENT, fontWeight: 700, textTransform: "uppercase" }}>
-                Monte Carlo (1000 simulations)
-              </div>
-              <button
-                onClick={runMonteCarlo}
-                disabled={mcLoading}
-                style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(79,140,255,0.12)", border: `1px solid ${ACCENT}`, color: ACCENT, borderRadius: 8, padding: "6px 10px", fontSize: 12, fontWeight: 600, cursor: mcLoading ? "default" : "pointer" }}
-              >
-                {mcLoading ? <Loader2 className="spin" size={13} /> : <Dices size={13} />} Lancer
-              </button>
-            </div>
-            {monteCarlo?.error && (
-              <div style={{ fontSize: 12, color: MUTED }}>
-                Il faut au moins {monteCarlo.minTrades} trades clôturés (tu en as {monteCarlo.count}) pour une simulation fiable.
-              </div>
-            )}
-            {monteCarlo && !monteCarlo.error && (
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
-                  <span style={{ fontSize: 13, color: MUTED }}>Probabilité d'atteindre +{monteCarlo.targetR}R</span>
-                  <span style={{ fontSize: 14, fontWeight: 700, color: POS }}>{fmt(monteCarlo.probReachTarget, 0)}%</span>
-                </div>
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
-                  <span style={{ fontSize: 13, color: MUTED }}>Probabilité de -{monteCarlo.drawdownLimitR}R de drawdown</span>
-                  <span style={{ fontSize: 14, fontWeight: 700, color: NEG }}>{fmt(monteCarlo.probBreachDrawdown, 0)}%</span>
-                </div>
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
-                  <span style={{ fontSize: 13, color: MUTED }}>Pire drawdown simulé</span>
-                  <span style={{ fontSize: 14, fontWeight: 700 }}>-{fmt(monteCarlo.worstDrawdownR, 1)}R</span>
-                </div>
-                <div style={{ fontSize: 11, color: MUTED, marginTop: 4 }}>
-                  Basé sur un rééchantillonnage de tes {stats.count} trades passés — ce n'est pas une prédiction du marché,
-                  c'est une mesure de la robustesse statistique de ton edge actuel.
-                </div>
-              </div>
-            )}
-          </div>
-        </>
-      ) : (
-        <div style={{ fontSize: 12, color: MUTED, marginBottom: 16 }}>
-          Ajoute au moins un trade clôturé pour voir les statistiques.
-        </div>
-      )}
-
-      {trades.length > 0 && (
-        <div>
-          <div style={{ fontSize: 11, color: MUTED, marginBottom: 8, textTransform: "uppercase" }}>
-            Historique ({trades.length})
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {[...trades].reverse().map((t) => {
-              const closed = t.exit != null && t.exit !== "";
-              const pnl = closed ? tradePnLPreview(t) : null;
-              return (
-                <div key={t.id} style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 8, padding: 10, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <div>
-                    <div style={{ fontSize: 13, fontWeight: 700 }}>
-                      {t.symbol} <span style={{ color: MUTED, fontWeight: 500 }}>({t.direction === "haussier" ? "Long" : "Short"})</span>
-                    </div>
-                    <div style={{ fontSize: 11, color: MUTED }}>
-                      {t.date} — entrée {t.entry} / stop {t.stop} / sortie {t.exit}
-                    </div>
-                  </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                    {closed && (
-                      <span style={{ fontSize: 13, fontWeight: 700, color: pnl >= 0 ? POS : NEG }}>
-                        {pnl >= 0 ? "+" : ""}{fmt(pnl)} €
-                      </span>
-                    )}
-                    <button onClick={() => remove(t.id)} style={{ background: "none", border: "none", cursor: "pointer", padding: 4 }}>
-                      <Trash2 size={14} color={MUTED} />
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// Aperçu du PnL affiché dans la liste — même formule que tradePnL() dans
-// journal.js, dupliquée ici volontairement car non exportée (calcul
-// d'affichage uniquement, la vraie source de vérité reste computeStats()).
-function tradePnLPreview(t) {
-  const sign = t.direction === "haussier" ? 1 : -1;
-  const qty = t.quantity || 1;
-  return sign * (t.exit - t.entry) * qty;
 }
 
 // ================= App =================
@@ -2722,7 +1399,6 @@ export default function TradingApp() {
     { id: "prix", label: "Prix & Niveaux", icon: LineChart },
     { id: "dossier", label: "Dossier", icon: FileText },
     { id: "calc", label: "Calculateur", icon: Calculator },
-    { id: "journal", label: "Journal", icon: BookOpen },
   ];
 
   return (
@@ -2787,7 +1463,6 @@ export default function TradingApp() {
           <Dossier setTab={setTab} setPrefillCalc={setPrefillCalc} />
         )}
         {tab === "calc" && <Calculateur prefill={prefillCalc} />}
-        {tab === "journal" && <JournalTab />}
       </div>
     </div>
   );
