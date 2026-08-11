@@ -12,9 +12,7 @@ import {
   Minus,
   Send,
   ListOrdered,
-  Wallet,
 } from "lucide-react";
-import LongTermTab from "./LongTermTab";
 
 // ---------- Thème ----------
 const NAVY = "#0E1420";
@@ -57,7 +55,7 @@ async function fetchMetalPrice(symbol) {
 // ---------- Helpers API ----------
 async function fetchCoinGeckoPrice(id) {
   const res = await fetch(
-    `/api/crypto?path=simple/price&ids=${id}&vs_currencies=usd&include_24hr_change=true`
+    `https://api.coingecko.com/api/v3/simple/price?ids=${id}&vs_currencies=usd&include_24hr_change=true`
   );
   if (!res.ok) throw new Error("Identifiant crypto introuvable");
   const data = await res.json();
@@ -67,7 +65,7 @@ async function fetchCoinGeckoPrice(id) {
 
 async function fetchCoinGeckoHistory(id, days) {
   const res = await fetch(
-    `/api/crypto?path=coins/${id}/market_chart&vs_currency=usd&days=${days}&interval=daily`
+    `https://api.coingecko.com/api/v3/coins/${id}/market_chart?vs_currency=usd&days=${days}&interval=daily`
   );
   if (!res.ok) throw new Error("Historique crypto indisponible");
   const data = await res.json();
@@ -76,7 +74,7 @@ async function fetchCoinGeckoHistory(id, days) {
 
 async function fetchCoinGeckoTop(n = 10) {
   const res = await fetch(
-    `/api/crypto?path=coins/markets&vs_currency=usd&order=market_cap_desc&per_page=${n}&page=1&price_change_percentage=24h`
+    `https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=${n}&page=1&price_change_percentage=24h`
   );
   if (!res.ok) throw new Error("Scanner indisponible");
   return res.json();
@@ -179,6 +177,98 @@ function trendFromHistory(history, days) {
 function supportResistance(history) {
   const closes = history.map((h) => h.close);
   return { support: Math.min(...closes), resistance: Math.max(...closes) };
+}
+
+// ---------- Moteur d'analyse partagé (Dossier + Top 15) ----------
+// Pour les devises classiques, on ne fait plus qu'UN SEUL appel Alpha Vantage
+// (l'historique) au lieu de deux : le dernier cours de la série sert de prix
+// actuel. Ça divise par deux la consommation de quota (25 req/jour) pour
+// chaque analyse, ce qui est indispensable pour pouvoir scanner plusieurs
+// devises d'affilée dans le Top 15 sans épuiser le quota du jour.
+async function runMarketAnalysis(type, query) {
+  let price, history;
+  const metal = type === "fx" && isMetal(query);
+
+  if (type === "crypto") {
+    const id = query.toLowerCase();
+    [price, history] = await Promise.all([
+      fetchCoinGeckoPrice(id),
+      fetchCoinGeckoHistory(id, 90),
+    ]);
+  } else if (type === "fx") {
+    const sym = query.toUpperCase();
+    if (metal) {
+      // Or / argent : pas d'historique gratuit, donc pas de tendance de prix.
+      price = await fetchMetalPrice(sym);
+      history = null;
+    } else {
+      history = await fetchFxHistory(sym);
+      const last = history[history.length - 1];
+      price = { price: last.close, change24h: null };
+    }
+  } else {
+    const sym = query.toUpperCase();
+    [price, history] = await Promise.all([
+      fetchAlphaQuote(sym),
+      fetchAlphaHistory(sym),
+    ]);
+  }
+
+  const t7 = history ? trendFromHistory(history, 7) : null;
+  const t30 = history ? trendFromHistory(history, 30) : null;
+  const t90 = history ? trendFromHistory(history, 90) : null;
+  const { support, resistance } = history
+    ? supportResistance(history.filter((h) => new Date(h.date).getTime() >= Date.now() - 30 * 86400000))
+    : { support: null, resistance: null };
+
+  let news = null;
+  let newsError = "";
+  try {
+    news = await fetchNewsSentiment(query);
+  } catch (e) {
+    newsError = e.message;
+  }
+
+  const trends = [t7, t30, t90].filter(Boolean);
+  let bullCount = trends.filter((t) => t.direction === "haussier").length;
+  let bearCount = trends.filter((t) => t.direction === "baissier").length;
+  if (news?.label === "positif") bullCount += 1;
+  if (news?.label === "négatif") bearCount += 1;
+
+  let verdict = "mitigé";
+  if (bullCount > bearCount) verdict = "haussier";
+  else if (bearCount > bullCount) verdict = "baissier";
+
+  // Score continu (pour trier le Top 15) : moyenne des variations % sur les
+  // fenêtres disponibles, bonifiée/pénalisée par le sentiment des actus.
+  const avgPct = trends.length ? trends.reduce((sum, t) => sum + t.pct, 0) / trends.length : 0;
+  const newsScore = news?.label === "positif" ? 2 : news?.label === "négatif" ? -2 : 0;
+  const score = avgPct + newsScore;
+
+  const reasoning = [
+    t7 && `Court terme (7j) : ${t7.direction} (${t7.pct > 0 ? "+" : ""}${t7.pct.toFixed(1)}%)`,
+    t30 && `Moyen terme (30j) : ${t30.direction} (${t30.pct > 0 ? "+" : ""}${t30.pct.toFixed(1)}%)`,
+    t90 && `Long terme (90j) : ${t90.direction} (${t90.pct > 0 ? "+" : ""}${t90.pct.toFixed(1)}%)`,
+    support != null
+      ? `Support 30j : $${support.toFixed(2)} — Résistance 30j : $${resistance.toFixed(2)}`
+      : "Historique de prix indisponible gratuitement pour l'or/l'argent — analyse basée sur le prix actuel et les actualités uniquement",
+    news
+      ? `Actualités : ton ${news.label} sur ${news.articleCount} articles récents`
+      : newsError
+      ? `Actualités indisponibles : ${newsError}`
+      : "Actualités non incluses",
+  ].filter(Boolean);
+
+  return {
+    symbol: query.toUpperCase(),
+    price: price.price,
+    support,
+    resistance,
+    verdict,
+    score,
+    reasoning,
+    news,
+  };
 }
 
 // ---------- UI: petit composant de tendance ----------
@@ -289,30 +379,6 @@ function Scanner({ onPick }) {
   );
 }
 
-function MiniChart({ history }) {
-  if (!history || history.length < 2) return null;
-  const closes = history.map((h) => h.close);
-  const min = Math.min(...closes);
-  const max = Math.max(...closes);
-  const range = max - min || 1;
-  const w = 300, h = 90, pad = 4;
-  const points = closes
-    .map((c, i) => {
-      const x = pad + (i / (closes.length - 1)) * (w - pad * 2);
-      const y = pad + (1 - (c - min) / range) * (h - pad * 2);
-      return `${x},${y}`;
-    })
-    .join(" ");
-  const trendUp = closes[closes.length - 1] >= closes[0];
-  return (
-    <div style={{ marginTop: 14, background: NAVY, border: `1px solid ${LINE}`, borderRadius: 8, padding: 10 }}>
-      <div style={{ fontSize: 11, color: MUTED, marginBottom: 6 }}>Évolution (30j)</div>
-      <svg viewBox={`0 0 ${w} ${h}`} width="100%" height={h} preserveAspectRatio="none">
-        <polyline points={points} fill="none" stroke={trendUp ? POS : NEG} strokeWidth="2" />
-      </svg>
-    </div>
-  );
-}
 // ================= Prix & Niveaux =================
 function PrixNiveaux({ prefill, setTab, setPrefillCalc }) {
   const [type, setType] = useState(prefill?.type || "crypto");
@@ -333,7 +399,7 @@ function PrixNiveaux({ prefill, setTab, setPrefillCalc }) {
           fetchCoinGeckoHistory(q.toLowerCase(), 30),
         ]);
         const { support, resistance } = supportResistance(history);
-        setResult({ ...price, support, resistance, symbol: q.toUpperCase(), history });
+        setResult({ ...price, support, resistance, symbol: q.toUpperCase() });
       } else if (t === "fx") {
         if (isMetal(q)) {
           // Or / argent : prix temps réel via gold-api.com, pas d'historique
@@ -481,7 +547,6 @@ function PrixNiveaux({ prefill, setTab, setPrefillCalc }) {
           >
             <Send size={13} /> Envoyer au calculateur
           </button>
-          <MiniChart history={result.history} />
         </div>
       )}
     </div>
@@ -502,84 +567,8 @@ function Dossier({ setTab, setPrefillCalc }) {
     setError("");
     setDossier(null);
     try {
-      let price, history;
-      if (type === "crypto") {
-        const id = query.toLowerCase();
-        [price, history] = await Promise.all([
-          fetchCoinGeckoPrice(id),
-          fetchCoinGeckoHistory(id, 90),
-        ]);
-      } else if (type === "fx") {
-        const sym = query.toUpperCase();
-        if (isMetal(sym)) {
-          // Pas d'historique gratuit pour l'or/argent : on analyse sans les
-          // tendances de prix, seulement le sentiment des actualités.
-          price = await fetchMetalPrice(sym);
-          history = null;
-        } else {
-          [price, history] = await Promise.all([
-            fetchFxQuote(sym),
-            fetchFxHistory(sym),
-          ]);
-        }
-      } else {
-        const sym = query.toUpperCase();
-        [price, history] = await Promise.all([
-          fetchAlphaQuote(sym),
-          fetchAlphaHistory(sym),
-        ]);
-      }
-
-      const t7 = history ? trendFromHistory(history, 7) : null;
-      const t30 = history ? trendFromHistory(history, 30) : null;
-      const t90 = history ? trendFromHistory(history, 90) : null;
-      const { support, resistance } = history
-        ? supportResistance(
-            history.filter((h) => new Date(h.date).getTime() >= Date.now() - 30 * 86400000)
-          )
-        : { support: null, resistance: null };
-
-      let news = null;
-      let newsError = "";
-      try {
-        news = await fetchNewsSentiment(query);
-      } catch (e) {
-        newsError = e.message;
-      }
-
-      const trends = [t7, t30, t90].filter(Boolean);
-      let bullCount = trends.filter((t) => t.direction === "haussier").length;
-      let bearCount = trends.filter((t) => t.direction === "baissier").length;
-      if (news?.label === "positif") bullCount += 1;
-      if (news?.label === "négatif") bearCount += 1;
-
-      let verdict = "mitigé";
-      if (bullCount > bearCount) verdict = "haussier";
-      else if (bearCount > bullCount) verdict = "baissier";
-
-      const reasoning = [
-        t7 && `Court terme (7j) : ${t7.direction} (${t7.pct > 0 ? "+" : ""}${t7.pct.toFixed(1)}%)`,
-        t30 && `Moyen terme (30j) : ${t30.direction} (${t30.pct > 0 ? "+" : ""}${t30.pct.toFixed(1)}%)`,
-        t90 && `Long terme (90j) : ${t90.direction} (${t90.pct > 0 ? "+" : ""}${t90.pct.toFixed(1)}%)`,
-        support != null
-          ? `Support 30j : $${support.toFixed(2)} — Résistance 30j : $${resistance.toFixed(2)}`
-          : "Historique de prix indisponible gratuitement pour l'or/l'argent — analyse basée sur le prix actuel et les actualités uniquement",
-        news
-          ? `Actualités : ton ${news.label} sur ${news.articleCount} articles récents`
-          : newsError
-          ? `Actualités indisponibles : ${newsError}`
-          : "Actualités non incluses",
-      ].filter(Boolean);
-
-      setDossier({
-        symbol: query.toUpperCase(),
-        price: price.price,
-        support,
-        resistance,
-        verdict,
-        reasoning,
-        news,
-      });
+      const result = await runMarketAnalysis(type, query);
+      setDossier(result);
     } catch (e) {
       setError(e.message);
     } finally {
@@ -717,118 +706,183 @@ function Dossier({ setTab, setPrefillCalc }) {
   );
 }
 
-// ================= Top 15 =================
-const FX_SCAN = ["EUR", "GBP", "JPY", "CHF", "CAD"];
+// ================= Top 15 marchés =================
+// Liste fixe : 8 cryptos (CoinGecko, gratuit/illimité) + or/argent
+// (gold-api.com, gratuit/illimité) + 5 devises majeures (Alpha Vantage,
+// 1 seul appel chacune grâce à runMarketAnalysis) = 5 crédits Alpha Vantage
+// consommés par scan, sur un quota de 25/jour.
+const WATCHLIST = [
+  { type: "crypto", query: "bitcoin", label: "Bitcoin (BTC)" },
+  { type: "crypto", query: "ethereum", label: "Ethereum (ETH)" },
+  { type: "crypto", query: "solana", label: "Solana (SOL)" },
+  { type: "crypto", query: "binancecoin", label: "BNB" },
+  { type: "crypto", query: "ripple", label: "XRP" },
+  { type: "crypto", query: "cardano", label: "Cardano (ADA)" },
+  { type: "crypto", query: "dogecoin", label: "Dogecoin (DOGE)" },
+  { type: "crypto", query: "avalanche-2", label: "Avalanche (AVAX)" },
+  { type: "fx", query: "XAU", label: "Or (XAU/USD)" },
+  { type: "fx", query: "XAG", label: "Argent (XAG/USD)" },
+  { type: "fx", query: "EUR", label: "EUR/USD" },
+  { type: "fx", query: "GBP", label: "GBP/USD" },
+  { type: "fx", query: "JPY", label: "JPY/USD" },
+  { type: "fx", query: "CHF", label: "CHF/USD" },
+  { type: "fx", query: "CAD", label: "CAD/USD" },
+];
 
-function verdictFromHistory(history) {
-  if (!history) return { verdict: "—", score: 0 };
-  const t7 = trendFromHistory(history, 7);
-  const t30 = trendFromHistory(history, 30);
-  const t90 = trendFromHistory(history, 90);
-  const trends = [t7, t30, t90].filter(Boolean);
-  const bull = trends.filter((t) => t.direction === "haussier").length;
-  const bear = trends.filter((t) => t.direction === "baissier").length;
-  const score = bull - bear;
-  let verdict = "mitigé";
-  if (score >= 2) verdict = "haussier";
-  else if (score <= -2) verdict = "baissier";
-  return { verdict, score: Math.abs(score) };
-}
-
-function Top15({ onPick }) {
-  const [rows, setRows] = useState([]);
+function TopMarkets({ onOpenMarket }) {
   const [loading, setLoading] = useState(false);
-  const [step, setStep] = useState("");
+  const [progress, setProgress] = useState({ done: 0, total: WATCHLIST.length });
+  const [results, setResults] = useState([]);
   const [error, setError] = useState("");
-
-  useEffect(() => {
-  runScan();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-}, []);
+  const [hasRun, setHasRun] = useState(false);
 
   const runScan = async () => {
     setLoading(true);
     setError("");
-    const results = [];
+    setResults([]);
+    setProgress({ done: 0, total: WATCHLIST.length });
+    const out = [];
 
-    try {
-      setStep("Cryptos…");
-      const top = await fetchCoinGeckoTop(8);
-      for (const c of top) {
-        try {
-          const history = await fetchCoinGeckoHistory(c.id, 90);
-          const { verdict, score } = verdictFromHistory(history);
-          results.push({ type: "crypto", query: c.id, name: c.symbol.toUpperCase(), price: c.current_price, verdict, score });
-        } catch {}
-        await new Promise((r) => setTimeout(r, 400));
+    for (const item of WATCHLIST) {
+      try {
+        const r = await runMarketAnalysis(item.type, item.query);
+        out.push({ ...r, label: item.label, type: item.type, query: item.query });
+      } catch (e) {
+        out.push({ label: item.label, type: item.type, query: item.query, error: e.message });
       }
-    } catch {
-      setError("Cryptos indisponibles pour l'instant.");
+      setProgress((p) => ({ ...p, done: p.done + 1 }));
+      // Petite pause de sécurité entre les appels Alpha Vantage (limite de
+      // 5 requêtes/minute sur le plan gratuit, en plus des 25/jour).
+      if (item.type === "fx" && !isMetal(item.query)) {
+        await new Promise((res) => setTimeout(res, 3000));
+      }
     }
 
-    setStep("Or et argent…");
-    for (const [sym, label] of [["XAU", "Or"], ["XAG", "Argent"]]) {
-      try {
-        const p = await fetchMetalPrice(sym);
-        results.push({ type: "fx", query: sym, name: label, price: p.price, verdict: "—", score: 0 });
-      } catch {}
+    const ok = out.filter((r) => !r.error);
+    const failed = out.filter((r) => r.error);
+    ok.sort((a, b) => b.score - a.score);
+    setResults([...ok, ...failed]);
+    if (failed.length > 0 && ok.length === 0) {
+      setError("Le scan a échoué pour tous les marchés — réessaie plus tard.");
     }
-
-    for (const sym of FX_SCAN) {
-      setStep(`${sym}/USD…`);
-      try {
-        const [p, history] = await Promise.all([fetchFxQuote(sym), fetchFxHistory(sym)]);
-        const { verdict, score } = verdictFromHistory(history);
-        results.push({ type: "fx", query: sym, name: `${sym}/USD`, price: p.price, verdict, score });
-        await new Promise((r) => setTimeout(r, 800));
-      } catch {}
-    }
-
-    results.sort((a, b) => b.score - a.score);
-    setRows(results);
-    setStep("");
+    setHasRun(true);
     setLoading(false);
-    if (results.length === 0) setError("Aucune donnée récupérée — réessaie dans un instant.");
   };
-
-  const verdictColor = (v) => (v === "haussier" ? POS : v === "baissier" ? NEG : MUTED);
 
   return (
     <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-        <div style={{ fontSize: 13, color: MUTED, maxWidth: 260, lineHeight: 1.5 }}>
-          Classement par force du signal technique (7j/30j/90j) — pas un conseil d'achat.
-        </div>
-        <button
-          onClick={runScan}
-          disabled={loading}
-          style={{ display: "flex", alignItems: "center", gap: 6, background: ACCENT, border: "none", borderRadius: 8, padding: "9px 14px", color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer", flexShrink: 0 }}
-        >
-          {loading ? <Loader2 className="spin" size={14} /> : <ListOrdered size={14} />}
-          {loading ? step || "Scan…" : "Scanner"}
-        </button>
+      <div style={{ fontSize: 13, color: MUTED, marginBottom: 16 }}>
+        Scan classé de 15 marchés (8 cryptos, or, argent, 5 devises majeures) avec la même
+        analyse que le Dossier — tendances 7j/30j/90j + sentiment des actualités. Classement du
+        plus haussier au plus baissier. Le scan prend environ 15 à 20 secondes.
       </div>
+
+      <button
+        onClick={runScan}
+        disabled={loading}
+        style={{
+          width: "100%",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: 8,
+          background: loading ? PANEL : ACCENT,
+          border: "none",
+          borderRadius: 8,
+          padding: "12px 0",
+          color: loading ? MUTED : "#fff",
+          fontWeight: 700,
+          fontSize: 14,
+          cursor: loading ? "default" : "pointer",
+          marginBottom: 16,
+        }}
+      >
+        {loading ? (
+          <>
+            <Loader2 className="spin" size={16} /> Analyse {progress.done}/{progress.total}…
+          </>
+        ) : (
+          <>
+            <ListOrdered size={16} /> {hasRun ? "Relancer le scan" : "Lancer le scan"}
+          </>
+        )}
+      </button>
 
       {error && <div style={{ color: NEG, fontSize: 13, marginBottom: 10 }}>{error}</div>}
 
-      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        {rows.map((r, i) => (
-          <button
-            key={r.type + r.query + i}
-            onClick={() => onPick({ type: r.type, query: r.query })}
-            style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: "12px 14px", cursor: "pointer", color: TEXT, textAlign: "left" }}
-          >
-            <div>
-              <div style={{ fontWeight: 600, fontSize: 14 }}>{r.name}</div>
-              <div style={{ fontSize: 11, color: MUTED }}>{r.type === "fx" ? "Devise / métal" : "Crypto"}</div>
-            </div>
-            <div style={{ textAlign: "right" }}>
-              <div style={{ fontWeight: 700, fontSize: 14 }}>${r.price?.toLocaleString(undefined, { maximumFractionDigits: 5 })}</div>
-              <div style={{ fontSize: 12, fontWeight: 600, color: verdictColor(r.verdict), textTransform: "uppercase" }}>{r.verdict}</div>
-            </div>
-          </button>
-        ))}
-      </div>
+      {results.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {results.map((r, i) => {
+            if (r.error) {
+              return (
+                <div
+                  key={`${r.type}-${r.query}`}
+                  style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: 12 }}
+                >
+                  <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 2 }}>{r.label}</div>
+                  <div style={{ fontSize: 12, color: NEG }}>{r.error}</div>
+                </div>
+              );
+            }
+            const verdictColor = r.verdict === "haussier" ? POS : r.verdict === "baissier" ? NEG : MUTED;
+            return (
+              <button
+                key={`${r.type}-${r.query}`}
+                onClick={() => onOpenMarket({ type: r.type, query: r.query })}
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  background: PANEL,
+                  border: `1px solid ${LINE}`,
+                  borderRadius: 10,
+                  padding: "12px 14px",
+                  cursor: "pointer",
+                  color: TEXT,
+                  textAlign: "left",
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <div
+                    style={{
+                      width: 22,
+                      height: 22,
+                      borderRadius: "50%",
+                      background: NAVY,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      fontSize: 11,
+                      fontWeight: 700,
+                      color: MUTED,
+                    }}
+                  >
+                    {i + 1}
+                  </div>
+                  <div>
+                    <div style={{ fontWeight: 600, fontSize: 14 }}>{r.label}</div>
+                    <div style={{ fontSize: 11, color: MUTED }}>${r.price.toLocaleString()}</div>
+                  </div>
+                </div>
+                <div
+                  style={{
+                    fontSize: 11,
+                    fontWeight: 700,
+                    color: verdictColor,
+                    background: `${verdictColor}22`,
+                    padding: "4px 10px",
+                    borderRadius: 20,
+                    textTransform: "uppercase",
+                    letterSpacing: 0.5,
+                  }}
+                >
+                  {r.verdict}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -864,16 +918,13 @@ function Calculateur({ prefill }) {
   const [invested, setInvested] = useState("50");
   const [leverage, setLeverage] = useState(LEVERAGE_PRESETS.crypto.leverage.toString());
   const [entry, setEntry] = useState(prefill?.entry?.toString() || "");
-  const [mode, setMode] = useState(prefill ? "auto" : "manuel");
-  const [lossPct, setLossPct] = useState("15");
-  const [gainPct, setGainPct] = useState("30");
-  const [stopManual, setStopManual] = useState(prefill?.stop?.toString() || "");
-  const [takeProfitManual, setTakeProfitManual] = useState("");
+  const [stop, setStop] = useState(prefill?.stop?.toString() || "");
+  const [takeProfit, setTakeProfit] = useState("");
 
   useEffect(() => {
-  if (prefill?.entry) setEntry(prefill.entry.toString());
-  if (prefill?.stop) setStopManual(prefill.stop.toString());
-}, [prefill]);
+    if (prefill?.entry) setEntry(prefill.entry.toString());
+    if (prefill?.stop) setStop(prefill.stop.toString());
+  }, [prefill]);
 
   const onAssetType = (t) => {
     setAssetType(t);
@@ -883,15 +934,8 @@ function Calculateur({ prefill }) {
   const inv = parseFloat(invested);
   const lev = parseFloat(leverage);
   const e = parseFloat(entry);
-  const lp = parseFloat(lossPct);
-  const gp = parseFloat(gainPct);
-
-  // Mode automatique : le stop/take-profit sont dérivés du % de la mise que tu es prêt à risquer/viser,
-  // ajusté par le levier — pas besoin de connaître un niveau de prix exact à l'avance.
-  const autoDistanceStop = e && lev && lp ? (e * (lp / 100)) / lev : null;
-  const autoDistanceGain = e && lev && gp ? (e * (gp / 100)) / lev : null;
-  const s = mode === "auto" ? (autoDistanceStop ? e - autoDistanceStop : null) : parseFloat(stopManual);
-  const tp = mode === "auto" ? (autoDistanceGain ? e + autoDistanceGain : null) : parseFloat(takeProfitManual);
+  const s = parseFloat(stop);
+  const tp = parseFloat(takeProfit);
 
   const valid = inv > 0 && lev > 0 && e > 0 && s > 0 && e !== s;
   const positionValue = valid ? inv * lev : null; // taille totale de la position en €
@@ -931,37 +975,8 @@ function Calculateur({ prefill }) {
       <CalcField label="Montant à investir — ta mise / marge (€)" value={invested} onChange={setInvested} placeholder="ex: 50" />
       <CalcField label="Levier (x1 = sans levier, ex: Binance spot)" value={leverage} onChange={setLeverage} placeholder="ex: 2" />
       <CalcField label="Prix d'entrée" value={entry} onChange={setEntry} placeholder="ex: 4346.55" />
-      <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
-        {[["auto", "Automatique (%)"], ["manuel", "Manuel (prix)"]].map(([m, label]) => (
-          <button
-            key={m}
-            onClick={() => setMode(m)}
-            style={{
-              flex: 1, padding: "7px 0", borderRadius: 8,
-              border: `1px solid ${mode === m ? ACCENT : LINE}`,
-              background: mode === m ? "rgba(79,140,255,0.12)" : "transparent",
-              color: mode === m ? ACCENT : MUTED, fontSize: 12, fontWeight: 600, cursor: "pointer",
-            }}
-          >{label}</button>
-        ))}
-      </div>
-
-      {mode === "auto" ? (
-        <>
-          <CalcField label="Perte max acceptée (% de la mise)" value={lossPct} onChange={setLossPct} placeholder="15" />
-          <CalcField label="Gain visé (% de la mise)" value={gainPct} onChange={setGainPct} placeholder="30" />
-          {s && tp && (
-            <div style={{ fontSize: 12, color: MUTED, marginBottom: 8 }}>
-              → Stop calculé : {s.toFixed(4)} — Take-profit calculé : {tp.toFixed(4)}
-            </div>
-          )}
-        </>
-      ) : (
-        <>
-          <CalcField label="Stop-loss (prix exact)" value={stopManual} onChange={setStopManual} placeholder="ex: 4300.00" />
-          <CalcField label="Take-profit (prix exact, optionnel)" value={takeProfitManual} onChange={setTakeProfitManual} placeholder="ex: 4420.00" />
-        </>
-      )}
+      <CalcField label="Stop-loss" value={stop} onChange={setStop} placeholder="ex: 4300.00" />
+      <CalcField label="Take-profit (optionnel)" value={takeProfit} onChange={setTakeProfit} placeholder="ex: 4420.00" />
 
       {valid ? (
         <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 16, marginTop: 8 }}>
@@ -1039,12 +1054,12 @@ export default function TradingApp() {
   const [prefillCalc, setPrefillCalc] = useState(null);
 
   const tabs = [
-  { id: "scan", label: "Scanner", icon: Search },
-  { id: "top15", label: "Top 15", icon: ListOrdered },
-  { id: "prix", label: "Prix & Niveaux", icon: LineChart },
-  { id: "calc", label: "Calculateur", icon: Calculator },
-  { id: "longterme", label: "Long Terme", icon: Wallet },
-];
+    { id: "top15", label: "Top 15", icon: ListOrdered },
+    { id: "scan", label: "Scanner", icon: Search },
+    { id: "prix", label: "Prix & Niveaux", icon: LineChart },
+    { id: "dossier", label: "Dossier", icon: FileText },
+    { id: "calc", label: "Calculateur", icon: Calculator },
+  ];
 
   return (
     <div style={{ minHeight: "100vh", background: NAVY, color: TEXT, padding: "28px 18px 60px" }}>
@@ -1058,7 +1073,7 @@ export default function TradingApp() {
           <div style={{ fontSize: 12, color: ACCENT, letterSpacing: 1.5, textTransform: "uppercase", fontWeight: 700, marginBottom: 4 }}>
             Discipline de trading
           </div>
-          <div style={{ fontSize: 24, fontWeight: 700 }}>Scanner, analyse &amp; calculateur</div>
+          <div style={{ fontSize: 24, fontWeight: 700 }}>Top 15 marchés &amp; calculateur</div>
         </div>
 
         <div style={{ display: "flex", gap: 4, marginBottom: 20, borderBottom: `1px solid ${LINE}`, paddingBottom: 4, flexWrap: "wrap" }}>
@@ -1085,16 +1100,16 @@ export default function TradingApp() {
           ))}
         </div>
 
-        {tab === "scan" && (
-          <Scanner
-            onPick={(r) => {
+        {tab === "top15" && (
+          <TopMarkets
+            onOpenMarket={(r) => {
               setPrefillPrix(r);
               setTab("prix");
             }}
           />
         )}
-        {tab === "top15" && (
-          <Top15
+        {tab === "scan" && (
+          <Scanner
             onPick={(r) => {
               setPrefillPrix(r);
               setTab("prix");
@@ -1104,8 +1119,10 @@ export default function TradingApp() {
         {tab === "prix" && (
           <PrixNiveaux prefill={prefillPrix} setTab={setTab} setPrefillCalc={setPrefillCalc} />
         )}
+        {tab === "dossier" && (
+          <Dossier setTab={setTab} setPrefillCalc={setPrefillCalc} />
+        )}
         {tab === "calc" && <Calculateur prefill={prefillCalc} />}
-        {tab === "longterme" && <LongTermTab />}
       </div>
     </div>
   );
