@@ -39,7 +39,7 @@ function calculateStructureScore(data) {
     };
   }
 
-  const direction = structure.direction;
+  const direction = structure.regime;
   const regime = structure.regime;
 
   // Structure directionnelle
