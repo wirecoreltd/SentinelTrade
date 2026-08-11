@@ -662,6 +662,72 @@ function calcFibonacciExtension(low, high, direction) {
   };
 }
 
+// ==================================================================
+// PASS 3 — Entry Algos & Risk/Reward
+// Ces fonctions ne votent PAS dans le verdict haussier/baissier/mitigé :
+// elles répondent à une question différente ("où/quand entrer si je suis
+// déjà d'accord avec le biais directionnel"), pas "quel est le biais".
+// Affichées comme information, pas comme signal supplémentaire.
+// ==================================================================
+
+// Z-score de la clôture par rapport à sa moyenne/écart-type glissants
+// (période 20 par défaut) : base du signal Mean Reversion.
+function calcZScore(closes, period = 20) {
+  const sma = calcSMA(closes, period);
+  const std = calcStdDev(closes, period);
+  return closes.map((c, i) => (sma[i] != null && std[i] ? (c - sma[i]) / std[i] : null));
+}
+
+// Breakout + Retest : le prix a cassé un niveau clé de la structure
+// (résistance en haussier, support en baissier) dans les `lookback`
+// dernières bougies, et se retrouve maintenant à moins de 1.5% de ce
+// niveau — configuration classique d'entrée sur retour au niveau cassé.
+function detectBreakoutRetest(history, structure, lookback = 10) {
+  if (!structure.resistance || !structure.support || structure.regime === "range") return { active: false };
+  const level = structure.regime === "haussier" ? structure.resistance : structure.support;
+  const recentBars = history.slice(-lookback, -1); // exclut la bougie courante
+  const broke =
+    structure.regime === "haussier"
+      ? recentBars.some((h) => h.close > level)
+      : recentBars.some((h) => h.close < level);
+  if (!broke) return { active: false };
+  const currentPrice = history[history.length - 1].close;
+  const distancePct = (Math.abs(currentPrice - level) / level) * 100;
+  return { active: distancePct < 1.5, level, distancePct, direction: structure.regime };
+}
+
+// Pullback Entry : dans une tendance établie, le prix est revenu tout
+// près de l'EMA20 sans l'avoir franchie dans le sens contraire — repli
+// classique avant une reprise de tendance.
+function detectPullback(currentPrice, ema20, trendDirection) {
+  if (ema20 == null || !trendDirection || trendDirection === "range" || trendDirection === "indéterminé") {
+    return { active: false };
+  }
+  const distancePct = (Math.abs(currentPrice - ema20) / ema20) * 100;
+  const nearEma = distancePct < 1.0;
+  const aligned = trendDirection === "haussier" ? currentPrice >= ema20 * 0.99 : currentPrice <= ema20 * 1.01;
+  return { active: nearEma && aligned, distancePct, ema20 };
+}
+
+// Mean Reversion (Z-score) : |z| > 2 = extension statistique significative
+// par rapport à la moyenne 20 périodes — pari sur un retour vers la
+// moyenne, donc SIGNAL OPPOSÉ à la direction de l'extension.
+function detectMeanReversion(zScoreLast) {
+  if (zScoreLast == null) return { active: false, zScore: null };
+  if (zScoreLast > 2) return { active: true, direction: "baissier", zScore: zScoreLast };
+  if (zScoreLast < -2) return { active: true, direction: "haussier", zScore: zScoreLast };
+  return { active: false, zScore: zScoreLast };
+}
+
+// Ratio Risque/Récompense explicite : distance entrée→stop vs entrée→cible.
+function calcRiskReward(entry, stop, target) {
+  if (entry == null || stop == null || target == null) return null;
+  const risk = Math.abs(entry - stop);
+  const reward = Math.abs(target - entry);
+  if (risk === 0) return null;
+  return { risk, reward, ratio: reward / risk };
+}
+
 // DMI / ADX façon Wilder.
 function calcADX(history, period = 14) {
   const n = history.length;
@@ -1068,6 +1134,19 @@ async function runMarketAnalysis(type, query) {
   const atrStop = support != null && atr != null ? support - 1.2 * atr : null;
   const atrStopShort = resistance != null && atr != null ? resistance + 1.2 * atr : null;
 
+  // ---- Pass 3 : Entry Algos & Risk/Reward ----
+  const zScoreLast = calcZScore(closes, 20)[lastIdx];
+  const breakoutRetest = detectBreakoutRetest(history, structure);
+  const pullback = detectPullback(currentPrice, ema20, structure.regime);
+  const meanReversion = detectMeanReversion(zScoreLast);
+
+  const riskReward =
+    structure.regime === "haussier"
+      ? calcRiskReward(currentPrice, atrStop, resistance)
+      : structure.regime === "baissier"
+      ? calcRiskReward(currentPrice, atrStopShort, support)
+      : null;
+
   const trendLabel =
     ema20 != null && ema50 != null
       ? currentPrice > ema20 && ema20 > ema50
@@ -1121,6 +1200,14 @@ async function runMarketAnalysis(type, query) {
       `Retracements Fibonacci du dernier swing : 38,2% $${fibRetracement["0.382"].toFixed(2)} — 50% $${fibRetracement["0.5"].toFixed(2)} — 61,8% $${fibRetracement["0.618"].toFixed(2)}`,
     fibExtension != null &&
       `Extensions Fibonacci (cibles de continuation ${structure.regime}) : 127,2% $${fibExtension["1.272"].toFixed(2)} — 161,8% $${fibExtension["1.618"].toFixed(2)}`,
+    breakoutRetest?.active &&
+      `Breakout+Retest : cassure ${breakoutRetest.direction} de $${breakoutRetest.level.toFixed(2)} confirmée, retest en cours (${breakoutRetest.distancePct.toFixed(1)}% du niveau)`,
+    pullback?.active &&
+      `Pullback Entry : repli sur l'EMA20 ($${pullback.ema20.toFixed(2)}, ${pullback.distancePct.toFixed(1)}% d'écart) dans une tendance ${structure.regime}`,
+    meanReversion?.active &&
+      `Mean Reversion : Z-score ${meanReversion.zScore.toFixed(2)} — extension statistique, pari sur un retour ${meanReversion.direction}`,
+    riskReward != null &&
+      `Risk/Reward : 1:${riskReward.ratio.toFixed(1)} (risque $${riskReward.risk.toFixed(2)} pour un potentiel de $${riskReward.reward.toFixed(2)})`,
     atr != null &&
       `ATR(14) : $${atr.toFixed(2)}${atrAvg != null ? ` (moyenne : $${atrAvg.toFixed(2)})` : ""}${type === "crypto" ? " — approximé en clôture-à-clôture faute d'OHLC gratuit" : ""}`,
     news
@@ -1144,6 +1231,10 @@ async function runMarketAnalysis(type, query) {
     pivots,
     fibRetracement,
     fibExtension,
+    breakoutRetest,
+    pullback,
+    meanReversion,
+    riskReward,
   };
 }
 
@@ -1586,6 +1677,48 @@ function Dossier({ setTab, setPrefillCalc }) {
                   </div>
                 </>
               )}
+            </div>
+          )}
+
+          {(dossier.breakoutRetest?.active || dossier.pullback?.active || dossier.meanReversion?.active || dossier.riskReward) && (
+            <div style={{ marginBottom: 14, borderTop: `1px solid ${LINE}`, paddingTop: 10 }}>
+              <div style={{ fontSize: 11, color: MUTED, marginBottom: 8, textTransform: "uppercase" }}>
+                Setups d'entrée
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {dossier.breakoutRetest?.active && (
+                  <div style={{ background: NAVY, borderRadius: 8, padding: 10 }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: ACCENT }}>Breakout + Retest</div>
+                    <div style={{ fontSize: 12, color: MUTED }}>
+                      Cassure {dossier.breakoutRetest.direction} de ${dossier.breakoutRetest.level.toFixed(2)}, retest à {dossier.breakoutRetest.distancePct.toFixed(1)}%
+                    </div>
+                  </div>
+                )}
+                {dossier.pullback?.active && (
+                  <div style={{ background: NAVY, borderRadius: 8, padding: 10 }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: ACCENT }}>Pullback Entry</div>
+                    <div style={{ fontSize: 12, color: MUTED }}>
+                      Repli sur l'EMA20 (${dossier.pullback.ema20.toFixed(2)}, {dossier.pullback.distancePct.toFixed(1)}% d'écart)
+                    </div>
+                  </div>
+                )}
+                {dossier.meanReversion?.active && (
+                  <div style={{ background: NAVY, borderRadius: 8, padding: 10 }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: ACCENT }}>Mean Reversion</div>
+                    <div style={{ fontSize: 12, color: MUTED }}>
+                      Z-score {dossier.meanReversion.zScore.toFixed(2)} — pari {dossier.meanReversion.direction} (contrarian)
+                    </div>
+                  </div>
+                )}
+                {dossier.riskReward && (
+                  <div style={{ background: NAVY, borderRadius: 8, padding: 10, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span style={{ fontSize: 12, color: MUTED }}>Risk/Reward</span>
+                    <span style={{ fontSize: 15, fontWeight: 700, color: dossier.riskReward.ratio >= 2 ? POS : dossier.riskReward.ratio >= 1 ? MUTED : NEG }}>
+                      1:{dossier.riskReward.ratio.toFixed(1)}
+                    </span>
+                  </div>
+                )}
+              </div>
             </div>
           )}
 
