@@ -1417,7 +1417,7 @@ async function runMarketAnalysis(type, query) {
   console.log("Warnings:", sentinel.warnings);
   console.log("══════════════════════════════════════");
 
-    return {
+      return {
     symbol: query.toUpperCase(),
     price: currentPrice,
     support,
@@ -1446,6 +1446,7 @@ async function runMarketAnalysis(type, query) {
     meanReversion,
     riskReward,
   };
+} // <-- IL MANQUAIT CETTE ACCOLADE
 
 // ---------- UI: petit composant de tendance ----------
 function TrendBadge({ label, trend }) {
