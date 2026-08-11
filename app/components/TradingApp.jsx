@@ -729,7 +729,22 @@ const WATCHLIST = [
   { type: "fx", query: "CAD", label: "CAD/USD" },
 ];
 
-function TopMarkets({ onOpenMarket }) {
+// Traduction du verdict en action concrète pour l'utilisateur.
+const ACTION_MAP = {
+  haussier: { label: "GO", color: POS },
+  baissier: { label: "AVOID", color: NEG },
+  mitigé: { label: "WAIT", color: MUTED },
+};
+
+// "Bitcoin (BTC)" -> { name: "Bitcoin", ticker: "BTC" }. Si pas de
+// parenthèses (ex: "EUR/USD"), le label entier sert de nom.
+function splitLabel(label) {
+  const m = label.match(/^(.+?)\s*\(([^)]+)\)$/);
+  if (m) return { name: m[1], ticker: m[2] };
+  return { name: label, ticker: "" };
+}
+
+function TopMarkets({ onSendToCalculator }) {
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: WATCHLIST.length });
   const [results, setResults] = useState([]);
@@ -751,10 +766,14 @@ function TopMarkets({ onOpenMarket }) {
         out.push({ label: item.label, type: item.type, query: item.query, error: e.message });
       }
       setProgress((p) => ({ ...p, done: p.done + 1 }));
-      // Petite pause de sécurité entre les appels Alpha Vantage (limite de
-      // 5 requêtes/minute sur le plan gratuit, en plus des 25/jour).
+      // Pause de sécurité entre chaque appel : CoinGecko rate-limite si on
+      // enchaîne trop de requêtes d'affilée (d'où les "Failed to fetch" sur
+      // les cryptos), et Alpha Vantage limite à 5 requêtes/minute en plus
+      // du quota de 25/jour.
       if (item.type === "fx" && !isMetal(item.query)) {
         await new Promise((res) => setTimeout(res, 3000));
+      } else {
+        await new Promise((res) => setTimeout(res, 800));
       }
     }
 
@@ -773,8 +792,8 @@ function TopMarkets({ onOpenMarket }) {
     <div>
       <div style={{ fontSize: 13, color: MUTED, marginBottom: 16 }}>
         Scan classé de 15 marchés (8 cryptos, or, argent, 5 devises majeures) avec la même
-        analyse que le Dossier — tendances 7j/30j/90j + sentiment des actualités. Classement du
-        plus haussier au plus baissier. Le scan prend environ 15 à 20 secondes.
+        analyse que le Dossier — tendances 7j/30j/90j + sentiment des actualités. Clique un
+        marché pour l'envoyer directement au calculateur. Le scan prend environ 20 à 30 secondes.
       </div>
 
       <button
@@ -812,27 +831,41 @@ function TopMarkets({ onOpenMarket }) {
 
       {results.length > 0 && (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {results.map((r, i) => {
+          {results.map((r) => {
+            const { name, ticker } = splitLabel(r.label);
+
             if (r.error) {
               return (
                 <div
                   key={`${r.type}-${r.query}`}
                   style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: 12 }}
                 >
-                  <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 2 }}>{r.label}</div>
+                  <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 2 }}>{name}</div>
                   <div style={{ fontSize: 12, color: NEG }}>{r.error}</div>
                 </div>
               );
             }
-            const verdictColor = r.verdict === "haussier" ? POS : r.verdict === "baissier" ? NEG : MUTED;
+
+            const action = ACTION_MAP[r.verdict] || ACTION_MAP["mitigé"];
+            const hasLevels = r.support != null && r.resistance != null;
+            // Prix d'achat = support (zone d'entrée) ; prix de vente =
+            // résistance (zone de sortie). Stop-loss suggéré : 2% sous le
+            // support, en garde-fou si le support est cassé. Pour l'or/argent
+            // (pas d'historique gratuit), on n'envoie que le prix actuel.
+            const buyPrice = hasLevels ? r.support : r.price;
+            const sellPrice = hasLevels ? r.resistance : null;
+
             return (
               <button
                 key={`${r.type}-${r.query}`}
-                onClick={() => onOpenMarket({ type: r.type, query: r.query })}
+                onClick={() =>
+                  onSendToCalculator(
+                    hasLevels
+                      ? { entry: buyPrice, stop: buyPrice * 0.98, takeProfit: sellPrice }
+                      : { entry: buyPrice }
+                  )
+                }
                 style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
                   background: PANEL,
                   border: `1px solid ${LINE}`,
                   borderRadius: 10,
@@ -842,42 +875,41 @@ function TopMarkets({ onOpenMarket }) {
                   textAlign: "left",
                 }}
               >
-                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: hasLevels ? 10 : 0 }}>
+                  <div>
+                    <div style={{ fontWeight: 700, fontSize: 14 }}>{name}</div>
+                    {ticker && (
+                      <div style={{ fontSize: 11, color: MUTED, textTransform: "uppercase" }}>{ticker}</div>
+                    )}
+                    <div style={{ fontSize: 13, fontWeight: 600, marginTop: 4 }}>${r.price.toLocaleString()}</div>
+                  </div>
                   <div
                     style={{
-                      width: 22,
-                      height: 22,
-                      borderRadius: "50%",
-                      background: NAVY,
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      fontSize: 11,
-                      fontWeight: 700,
-                      color: MUTED,
+                      fontSize: 12,
+                      fontWeight: 800,
+                      color: action.color,
+                      background: `${action.color}22`,
+                      padding: "5px 12px",
+                      borderRadius: 20,
+                      letterSpacing: 0.5,
                     }}
                   >
-                    {i + 1}
-                  </div>
-                  <div>
-                    <div style={{ fontWeight: 600, fontSize: 14 }}>{r.label}</div>
-                    <div style={{ fontSize: 11, color: MUTED }}>${r.price.toLocaleString()}</div>
+                    {action.label}
                   </div>
                 </div>
-                <div
-                  style={{
-                    fontSize: 11,
-                    fontWeight: 700,
-                    color: verdictColor,
-                    background: `${verdictColor}22`,
-                    padding: "4px 10px",
-                    borderRadius: 20,
-                    textTransform: "uppercase",
-                    letterSpacing: 0.5,
-                  }}
-                >
-                  {r.verdict}
-                </div>
+
+                {hasLevels && (
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                    <div style={{ background: NAVY, borderRadius: 8, padding: 8 }}>
+                      <div style={{ fontSize: 10, color: MUTED }}>Prix d'achat</div>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: POS }}>${buyPrice.toFixed(2)}</div>
+                    </div>
+                    <div style={{ background: NAVY, borderRadius: 8, padding: 8 }}>
+                      <div style={{ fontSize: 10, color: MUTED }}>Prix de vente</div>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: NEG }}>${sellPrice.toFixed(2)}</div>
+                    </div>
+                  </div>
+                )}
               </button>
             );
           })}
@@ -919,11 +951,12 @@ function Calculateur({ prefill }) {
   const [leverage, setLeverage] = useState(LEVERAGE_PRESETS.crypto.leverage.toString());
   const [entry, setEntry] = useState(prefill?.entry?.toString() || "");
   const [stop, setStop] = useState(prefill?.stop?.toString() || "");
-  const [takeProfit, setTakeProfit] = useState("");
+  const [takeProfit, setTakeProfit] = useState(prefill?.takeProfit?.toString() || "");
 
   useEffect(() => {
     if (prefill?.entry) setEntry(prefill.entry.toString());
     if (prefill?.stop) setStop(prefill.stop.toString());
+    if (prefill?.takeProfit) setTakeProfit(prefill.takeProfit.toString());
   }, [prefill]);
 
   const onAssetType = (t) => {
@@ -1102,9 +1135,9 @@ export default function TradingApp() {
 
         {tab === "top15" && (
           <TopMarkets
-            onOpenMarket={(r) => {
-              setPrefillPrix(r);
-              setTab("prix");
+            onSendToCalculator={(prefill) => {
+              setPrefillCalc(prefill);
+              setTab("calc");
             }}
           />
         )}
