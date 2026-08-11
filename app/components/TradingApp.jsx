@@ -17,6 +17,7 @@ import {
   Dices,
 } from "lucide-react";
 import { getTrades, addTrade, deleteTrade, computeStats, monteCarloSimulation } from "../lib/journal";
+import calculateSentinelScore from "../lib/sentinelEngine";
 
 // ---------- Thème ----------
 const NAVY = "#0E1420";
@@ -1354,13 +1355,79 @@ async function runMarketAnalysis(type, query) {
       : "Actualités non incluses",
   ].filter(Boolean);
 
-  return {
+    // ----------------------------------------------------------
+  // SENTINEL ENGINE V1
+  // Analyse de la qualité du setup
+  // ----------------------------------------------------------
+
+  const sentinel = calculateSentinelScore({
+    currentPrice,
+
+    // Structure
+    structure,
+
+    // Trend
+    ema20,
+    ema50,
+    adx: adxLast,
+    plusDI: plusDILast,
+    minusDI: minusDILast,
+
+    // Momentum
+    rsi,
+    macd: {
+      line: macdLast,
+      signal: macdSignalLast,
+      histogram: macdHistLast,
+    },
+
+    // Volatility
+    atr,
+    atrAvg,
+    volatilityRegime: volRegime,
+
+    // Levels
+    support,
+    resistance,
+    pivots,
+    fibRetracement,
+
+    // Entry
+    breakoutRetest,
+    pullback,
+    meanReversion,
+
+    // Risk
+    riskReward,
+
+    // Ancien moteur — conservé comme référence
+    verdict,
+  });
+
+  console.log("══════════════════════════════════════");
+  console.log("🛡️ SENTINEL ENGINE V1");
+  console.log("══════════════════════════════════════");
+  console.log("Symbol:", query.toUpperCase());
+  console.log("Sentinel Score:", sentinel.score);
+  console.log("Bias:", sentinel.bias);
+  console.log("Setup:", sentinel.setup);
+  console.log("Status:", sentinel.status);
+  console.log("Breakdown:", sentinel.breakdown);
+  console.log("Reasons:", sentinel.reasons);
+  console.log("Warnings:", sentinel.warnings);
+  console.log("══════════════════════════════════════");
+
+    return {
     symbol: query.toUpperCase(),
     price: currentPrice,
     support,
     resistance,
     verdict,
     score: bull - bear,
+
+    // Nouveau moteur
+    sentinel,
+
     reasoning,
     news,
     atrStop,
@@ -1379,7 +1446,6 @@ async function runMarketAnalysis(type, query) {
     meanReversion,
     riskReward,
   };
-}
 
 // ---------- UI: petit composant de tendance ----------
 function TrendBadge({ label, trend }) {
