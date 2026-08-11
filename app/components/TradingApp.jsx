@@ -12,7 +12,11 @@ import {
   Minus,
   Send,
   ListOrdered,
+  BookOpen,
+  Trash2,
+  Dices,
 } from "lucide-react";
+import { getTrades, addTrade, deleteTrade, computeStats, monteCarloSimulation } from "../lib/journal";
 
 // ---------- Thème ----------
 const NAVY = "#0E1420";
@@ -2378,6 +2382,267 @@ function Calculateur({ prefill }) {
   );
 }
 
+// ================= Journal de trades =================
+const StatCell = ({ label, value, color }) => (
+  <div style={{ background: NAVY, borderRadius: 8, padding: 10 }}>
+    <div style={{ fontSize: 10, color: MUTED, marginBottom: 2 }}>{label}</div>
+    <div style={{ fontSize: 15, fontWeight: 700, color: color || TEXT }}>{value}</div>
+  </div>
+);
+
+function fmt(n, digits = 2) {
+  if (n == null || Number.isNaN(n)) return "—";
+  if (!Number.isFinite(n)) return "∞";
+  return n.toFixed(digits);
+}
+
+function JournalTab() {
+  const [trades, setTrades] = useState([]);
+  const [form, setForm] = useState({
+    symbol: "",
+    direction: "haussier",
+    entry: "",
+    stop: "",
+    exit: "",
+    quantity: "",
+    date: new Date().toISOString().slice(0, 10),
+  });
+  const [monteCarlo, setMonteCarlo] = useState(null);
+  const [mcLoading, setMcLoading] = useState(false);
+
+  useEffect(() => {
+    setTrades(getTrades());
+  }, []);
+
+  const stats = computeStats(trades);
+
+  const submit = (e) => {
+    e.preventDefault();
+    if (!form.symbol || !form.entry || !form.stop || !form.exit) return;
+    const updated = addTrade({
+      symbol: form.symbol.toUpperCase(),
+      direction: form.direction,
+      entry: parseFloat(form.entry),
+      stop: parseFloat(form.stop),
+      exit: parseFloat(form.exit),
+      quantity: form.quantity ? parseFloat(form.quantity) : null,
+      date: form.date,
+    });
+    setTrades(updated);
+    setForm({ ...form, symbol: "", entry: "", stop: "", exit: "", quantity: "" });
+    setMonteCarlo(null); // les stats ont changé, on invalide l'ancienne simulation
+  };
+
+  const remove = (id) => {
+    setTrades(deleteTrade(id));
+    setMonteCarlo(null);
+  };
+
+  const runMonteCarlo = () => {
+    setMcLoading(true);
+    // setTimeout pour laisser le loader s'afficher — 1000 simulations sur
+    // peu de trades est quasi instantané mais ça évite un flash bizarre.
+    setTimeout(() => {
+      setMonteCarlo(monteCarloSimulation(trades, 1000, 20, 10));
+      setMcLoading(false);
+    }, 50);
+  };
+
+  return (
+    <div>
+      <div style={{ fontSize: 13, color: MUTED, marginBottom: 16 }}>
+        Journal de tes trades clôturés + statistiques calculées dessus (Win Rate, Expectancy,
+        Profit Factor, Drawdown, Sharpe/Sortino/Calmar). Stocké uniquement dans ton navigateur.
+      </div>
+
+      <form onSubmit={submit} style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 16, marginBottom: 16 }}>
+        <div style={{ fontSize: 12, color: ACCENT, fontWeight: 700, textTransform: "uppercase", marginBottom: 10 }}>
+          Ajouter un trade clôturé
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+          <input
+            value={form.symbol}
+            onChange={(e) => setForm({ ...form, symbol: e.target.value })}
+            placeholder="Symbole (ex: BTC)"
+            style={{ background: NAVY, border: `1px solid ${LINE}`, borderRadius: 8, padding: "9px 10px", color: TEXT, fontSize: 13 }}
+          />
+          <select
+            value={form.direction}
+            onChange={(e) => setForm({ ...form, direction: e.target.value })}
+            style={{ background: NAVY, border: `1px solid ${LINE}`, borderRadius: 8, padding: "9px 10px", color: TEXT, fontSize: 13 }}
+          >
+            <option value="haussier">Long</option>
+            <option value="baissier">Short</option>
+          </select>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 8 }}>
+          <input
+            value={form.entry}
+            onChange={(e) => setForm({ ...form, entry: e.target.value })}
+            placeholder="Entrée"
+            inputMode="decimal"
+            style={{ background: NAVY, border: `1px solid ${LINE}`, borderRadius: 8, padding: "9px 10px", color: TEXT, fontSize: 13 }}
+          />
+          <input
+            value={form.stop}
+            onChange={(e) => setForm({ ...form, stop: e.target.value })}
+            placeholder="Stop"
+            inputMode="decimal"
+            style={{ background: NAVY, border: `1px solid ${LINE}`, borderRadius: 8, padding: "9px 10px", color: TEXT, fontSize: 13 }}
+          />
+          <input
+            value={form.exit}
+            onChange={(e) => setForm({ ...form, exit: e.target.value })}
+            placeholder="Sortie"
+            inputMode="decimal"
+            style={{ background: NAVY, border: `1px solid ${LINE}`, borderRadius: 8, padding: "9px 10px", color: TEXT, fontSize: 13 }}
+          />
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
+          <input
+            value={form.quantity}
+            onChange={(e) => setForm({ ...form, quantity: e.target.value })}
+            placeholder="Quantité (optionnel)"
+            inputMode="decimal"
+            style={{ background: NAVY, border: `1px solid ${LINE}`, borderRadius: 8, padding: "9px 10px", color: TEXT, fontSize: 13 }}
+          />
+          <input
+            type="date"
+            value={form.date}
+            onChange={(e) => setForm({ ...form, date: e.target.value })}
+            style={{ background: NAVY, border: `1px solid ${LINE}`, borderRadius: 8, padding: "9px 10px", color: TEXT, fontSize: 13 }}
+          />
+        </div>
+        <button
+          type="submit"
+          style={{ width: "100%", background: ACCENT, border: "none", borderRadius: 8, padding: "10px 0", color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer" }}
+        >
+          Ajouter au journal
+        </button>
+      </form>
+
+      {stats.count > 0 ? (
+        <>
+          <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 16, marginBottom: 16 }}>
+            <div style={{ fontSize: 12, color: ACCENT, fontWeight: 700, textTransform: "uppercase", marginBottom: 10 }}>
+              Statistiques ({stats.count} trades clôturés)
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 8 }}>
+              <StatCell label="Win Rate" value={`${fmt(stats.winRate, 0)}%`} color={stats.winRate >= 50 ? POS : NEG} />
+              <StatCell label="Profit Factor" value={fmt(stats.profitFactor)} color={stats.profitFactor >= 1 ? POS : NEG} />
+              <StatCell label="Expectancy" value={`${fmt(stats.expectancy)} €`} color={stats.expectancy >= 0 ? POS : NEG} />
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 8 }}>
+              <StatCell label="Expectancy (R)" value={`${fmt(stats.expectancyR)}R`} color={stats.expectancyR >= 0 ? POS : NEG} />
+              <StatCell label="Gain moyen" value={`${fmt(stats.avgWin)} €`} color={POS} />
+              <StatCell label="Perte moyenne" value={`${fmt(stats.avgLoss)} €`} color={NEG} />
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 8 }}>
+              <StatCell label="Max Drawdown" value={`${fmt(stats.maxDrawdown)} € (${fmt(stats.maxDrawdownPct, 0)}%)`} color={NEG} />
+              <StatCell label="Recovery Factor" value={fmt(stats.recoveryFactor)} />
+              <StatCell label="Profit net" value={`${fmt(stats.netProfit)} €`} color={stats.netProfit >= 0 ? POS : NEG} />
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+              <StatCell label="Sharpe" value={fmt(stats.sharpe)} />
+              <StatCell label="Sortino" value={fmt(stats.sortino)} />
+              <StatCell label="Calmar" value={fmt(stats.calmar)} />
+            </div>
+          </div>
+
+          <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 16, marginBottom: 16 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+              <div style={{ fontSize: 12, color: ACCENT, fontWeight: 700, textTransform: "uppercase" }}>
+                Monte Carlo (1000 simulations)
+              </div>
+              <button
+                onClick={runMonteCarlo}
+                disabled={mcLoading}
+                style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(79,140,255,0.12)", border: `1px solid ${ACCENT}`, color: ACCENT, borderRadius: 8, padding: "6px 10px", fontSize: 12, fontWeight: 600, cursor: mcLoading ? "default" : "pointer" }}
+              >
+                {mcLoading ? <Loader2 className="spin" size={13} /> : <Dices size={13} />} Lancer
+              </button>
+            </div>
+            {monteCarlo?.error && (
+              <div style={{ fontSize: 12, color: MUTED }}>
+                Il faut au moins {monteCarlo.minTrades} trades clôturés (tu en as {monteCarlo.count}) pour une simulation fiable.
+              </div>
+            )}
+            {monteCarlo && !monteCarlo.error && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <span style={{ fontSize: 13, color: MUTED }}>Probabilité d'atteindre +{monteCarlo.targetR}R</span>
+                  <span style={{ fontSize: 14, fontWeight: 700, color: POS }}>{fmt(monteCarlo.probReachTarget, 0)}%</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <span style={{ fontSize: 13, color: MUTED }}>Probabilité de -{monteCarlo.drawdownLimitR}R de drawdown</span>
+                  <span style={{ fontSize: 14, fontWeight: 700, color: NEG }}>{fmt(monteCarlo.probBreachDrawdown, 0)}%</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <span style={{ fontSize: 13, color: MUTED }}>Pire drawdown simulé</span>
+                  <span style={{ fontSize: 14, fontWeight: 700 }}>-{fmt(monteCarlo.worstDrawdownR, 1)}R</span>
+                </div>
+                <div style={{ fontSize: 11, color: MUTED, marginTop: 4 }}>
+                  Basé sur un rééchantillonnage de tes {stats.count} trades passés — ce n'est pas une prédiction du marché,
+                  c'est une mesure de la robustesse statistique de ton edge actuel.
+                </div>
+              </div>
+            )}
+          </div>
+        </>
+      ) : (
+        <div style={{ fontSize: 12, color: MUTED, marginBottom: 16 }}>
+          Ajoute au moins un trade clôturé pour voir les statistiques.
+        </div>
+      )}
+
+      {trades.length > 0 && (
+        <div>
+          <div style={{ fontSize: 11, color: MUTED, marginBottom: 8, textTransform: "uppercase" }}>
+            Historique ({trades.length})
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {[...trades].reverse().map((t) => {
+              const closed = t.exit != null && t.exit !== "";
+              const pnl = closed ? tradePnLPreview(t) : null;
+              return (
+                <div key={t.id} style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 8, padding: 10, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <div>
+                    <div style={{ fontSize: 13, fontWeight: 700 }}>
+                      {t.symbol} <span style={{ color: MUTED, fontWeight: 500 }}>({t.direction === "haussier" ? "Long" : "Short"})</span>
+                    </div>
+                    <div style={{ fontSize: 11, color: MUTED }}>
+                      {t.date} — entrée {t.entry} / stop {t.stop} / sortie {t.exit}
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    {closed && (
+                      <span style={{ fontSize: 13, fontWeight: 700, color: pnl >= 0 ? POS : NEG }}>
+                        {pnl >= 0 ? "+" : ""}{fmt(pnl)} €
+                      </span>
+                    )}
+                    <button onClick={() => remove(t.id)} style={{ background: "none", border: "none", cursor: "pointer", padding: 4 }}>
+                      <Trash2 size={14} color={MUTED} />
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Aperçu du PnL affiché dans la liste — même formule que tradePnL() dans
+// journal.js, dupliquée ici volontairement car non exportée (calcul
+// d'affichage uniquement, la vraie source de vérité reste computeStats()).
+function tradePnLPreview(t) {
+  const sign = t.direction === "haussier" ? 1 : -1;
+  const qty = t.quantity || 1;
+  return sign * (t.exit - t.entry) * qty;
+}
+
 // ================= App =================
 export default function TradingApp() {
   const [tab, setTab] = useState("top15");
@@ -2390,6 +2655,7 @@ export default function TradingApp() {
     { id: "prix", label: "Prix & Niveaux", icon: LineChart },
     { id: "dossier", label: "Dossier", icon: FileText },
     { id: "calc", label: "Calculateur", icon: Calculator },
+    { id: "journal", label: "Journal", icon: BookOpen },
   ];
 
   return (
@@ -2454,6 +2720,7 @@ export default function TradingApp() {
           <Dossier setTab={setTab} setPrefillCalc={setPrefillCalc} />
         )}
         {tab === "calc" && <Calculateur prefill={prefillCalc} />}
+        {tab === "journal" && <JournalTab />}
       </div>
     </div>
   );
