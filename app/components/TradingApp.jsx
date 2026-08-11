@@ -234,6 +234,287 @@ function calcATR(history, period = 14) {
   return out;
 }
 
+// ==================================================================
+// PASS 1 — Nouveaux indicateurs techniques (Trend / Momentum / Volatility)
+// Ajoutés en complément du socle EMA/ADX/Ichimoku/Structure ci-dessus.
+// Tous acceptent le même format d'historique { date, close, high, low }.
+// Pour les cryptos (CoinGecko market_chart), high = low = close, donc les
+// indicateurs basés sur l'amplitude (Stochastic, CCI, Aroon, Supertrend,
+// PSAR, Williams %R, Choppiness, Keltner) dégénèrent partiellement — c'est
+// la même limitation que pour l'ATR/ADX existants, déjà documentée plus haut.
+// ==================================================================
+
+// --- Trend ---
+
+function calcSMA(values, period) {
+  const out = new Array(values.length).fill(null);
+  for (let i = period - 1; i < values.length; i++) {
+    let sum = 0;
+    for (let j = i - period + 1; j <= i; j++) sum += values[j];
+    out[i] = sum / period;
+  }
+  return out;
+}
+
+function calcWMA(values, period) {
+  const out = new Array(values.length).fill(null);
+  const denom = (period * (period + 1)) / 2;
+  for (let i = period - 1; i < values.length; i++) {
+    let sum = 0;
+    for (let j = 0; j < period; j++) sum += values[i - period + 1 + j] * (j + 1);
+    out[i] = sum / denom;
+  }
+  return out;
+}
+
+// Hull MA = WMA(2×WMA(n/2) − WMA(n), √n). Réagit plus vite que l'EMA tout en
+// restant lissée. Approximation : les nulls de tête de la WMA intermédiaire
+// sont remplacés par la valeur brute avant le second passage WMA, pour ne
+// pas perdre toute la série — sans impact une fois la période "period" passée.
+function calcHMA(values, period) {
+  const halfPeriod = Math.max(1, Math.round(period / 2));
+  const sqrtPeriod = Math.max(1, Math.round(Math.sqrt(period)));
+  const wmaHalf = calcWMA(values, halfPeriod);
+  const wmaFull = calcWMA(values, period);
+  const diff = values.map((_, i) => (wmaHalf[i] != null && wmaFull[i] != null ? 2 * wmaHalf[i] - wmaFull[i] : null));
+  const filled = diff.map((d, i) => (d == null ? values[i] : d));
+  const hma = calcWMA(filled, sqrtPeriod);
+  return hma.map((h, i) => (diff[i] == null ? null : h));
+}
+
+function calcMACD(closes, fast = 12, slow = 26, signalPeriod = 9) {
+  const emaFast = calcEMA(closes, fast);
+  const emaSlow = calcEMA(closes, slow);
+  const macdLine = closes.map((_, i) => emaFast[i] - emaSlow[i]);
+  const signalLine = calcEMA(macdLine, signalPeriod);
+  const histogram = macdLine.map((m, i) => m - signalLine[i]);
+  return { macdLine, signalLine, histogram };
+}
+
+// Supertrend (période ATR 10, multiplicateur 3 par défaut).
+function calcSupertrend(history, period = 10, multiplier = 3) {
+  const atr = calcATR(history, period);
+  const n = history.length;
+  const finalUpper = new Array(n).fill(null);
+  const finalLower = new Array(n).fill(null);
+  const trend = new Array(n).fill(null); // 'up' | 'down'
+  for (let i = 0; i < n; i++) {
+    if (atr[i] == null) continue;
+    const mid = (history[i].high + history[i].low) / 2;
+    const basicUpper = mid + multiplier * atr[i];
+    const basicLower = mid - multiplier * atr[i];
+    if (finalUpper[i - 1] == null) {
+      finalUpper[i] = basicUpper;
+      finalLower[i] = basicLower;
+      trend[i] = history[i].close > basicUpper ? "up" : "down";
+      continue;
+    }
+    finalUpper[i] =
+      basicUpper < finalUpper[i - 1] || history[i - 1].close > finalUpper[i - 1] ? basicUpper : finalUpper[i - 1];
+    finalLower[i] =
+      basicLower > finalLower[i - 1] || history[i - 1].close < finalLower[i - 1] ? basicLower : finalLower[i - 1];
+    const prevTrend = trend[i - 1];
+    trend[i] =
+      prevTrend === "up"
+        ? history[i].close < finalLower[i] ? "down" : "up"
+        : history[i].close > finalUpper[i] ? "up" : "down";
+  }
+  return { trend, upperBand: finalUpper, lowerBand: finalLower };
+}
+
+function calcAroon(history, period = 25) {
+  const n = history.length;
+  const aroonUp = new Array(n).fill(null);
+  const aroonDown = new Array(n).fill(null);
+  for (let i = period; i < n; i++) {
+    const windowSlice = history.slice(i - period, i + 1); // period+1 bougies jusqu'à i inclus
+    let highestIdx = 0, lowestIdx = 0;
+    windowSlice.forEach((h, j) => {
+      if (h.high >= windowSlice[highestIdx].high) highestIdx = j;
+      if (h.low <= windowSlice[lowestIdx].low) lowestIdx = j;
+    });
+    aroonUp[i] = (highestIdx / period) * 100;
+    aroonDown[i] = (lowestIdx / period) * 100;
+  }
+  return { aroonUp, aroonDown };
+}
+
+// Parabolic SAR (accélération 0.02, max 0.2 par défaut).
+function calcParabolicSAR(history, step = 0.02, maxStep = 0.2) {
+  const n = history.length;
+  const sar = new Array(n).fill(null);
+  const trend = new Array(n).fill(null);
+  if (n < 2) return { sar, trend };
+  let isUp = history[1].close > history[0].close;
+  let af = step;
+  let ep = isUp ? history[0].high : history[0].low;
+  let currentSar = isUp ? history[0].low : history[0].high;
+  sar[0] = currentSar;
+  trend[0] = isUp ? "up" : "down";
+  for (let i = 1; i < n; i++) {
+    currentSar = currentSar + af * (ep - currentSar);
+    if (isUp) {
+      const prevLow2 = i >= 2 ? history[i - 2].low : history[i - 1].low;
+      currentSar = Math.min(currentSar, history[i - 1].low, prevLow2);
+      if (history[i].low < currentSar) {
+        isUp = false;
+        currentSar = ep;
+        ep = history[i].low;
+        af = step;
+      } else if (history[i].high > ep) {
+        ep = history[i].high;
+        af = Math.min(af + step, maxStep);
+      }
+    } else {
+      const prevHigh2 = i >= 2 ? history[i - 2].high : history[i - 1].high;
+      currentSar = Math.max(currentSar, history[i - 1].high, prevHigh2);
+      if (history[i].high > currentSar) {
+        isUp = true;
+        currentSar = ep;
+        ep = history[i].high;
+        af = step;
+      } else if (history[i].low < ep) {
+        ep = history[i].low;
+        af = Math.min(af + step, maxStep);
+      }
+    }
+    sar[i] = currentSar;
+    trend[i] = isUp ? "up" : "down";
+  }
+  return { sar, trend };
+}
+
+// --- Momentum ---
+
+function calcStochastic(history, period = 14, smoothK = 3, smoothD = 3) {
+  const n = history.length;
+  const rawK = new Array(n).fill(null);
+  for (let i = period - 1; i < n; i++) {
+    const windowSlice = history.slice(i - period + 1, i + 1);
+    const highestHigh = Math.max(...windowSlice.map((h) => h.high));
+    const lowestLow = Math.min(...windowSlice.map((h) => h.low));
+    rawK[i] = highestHigh === lowestLow ? 50 : ((history[i].close - lowestLow) / (highestHigh - lowestLow)) * 100;
+  }
+  // Lissage SMA sur les valeurs déjà valides uniquement (0 en placeholder avant, retiré après).
+  const kFilled = calcSMA(rawK.map((v) => (v == null ? 0 : v)), smoothK).map((v, i) => (rawK[i] == null ? null : v));
+  const dFilled = calcSMA(kFilled.map((v) => (v == null ? 0 : v)), smoothD).map((v, i) => (kFilled[i] == null ? null : v));
+  return { k: kFilled, d: dFilled };
+}
+
+function calcWilliamsR(history, period = 14) {
+  const n = history.length;
+  const out = new Array(n).fill(null);
+  for (let i = period - 1; i < n; i++) {
+    const windowSlice = history.slice(i - period + 1, i + 1);
+    const highestHigh = Math.max(...windowSlice.map((h) => h.high));
+    const lowestLow = Math.min(...windowSlice.map((h) => h.low));
+    out[i] = highestHigh === lowestLow ? -50 : ((highestHigh - history[i].close) / (highestHigh - lowestLow)) * -100;
+  }
+  return out;
+}
+
+function calcCCI(history, period = 20) {
+  const n = history.length;
+  const typicalPrices = history.map((h) => (h.high + h.low + h.close) / 3);
+  const out = new Array(n).fill(null);
+  for (let i = period - 1; i < n; i++) {
+    const windowSlice = typicalPrices.slice(i - period + 1, i + 1);
+    const sma = windowSlice.reduce((a, b) => a + b, 0) / period;
+    const meanDev = windowSlice.reduce((a, b) => a + Math.abs(b - sma), 0) / period;
+    out[i] = meanDev === 0 ? 0 : (typicalPrices[i] - sma) / (0.015 * meanDev);
+  }
+  return out;
+}
+
+function calcROC(closes, period = 12) {
+  const n = closes.length;
+  const out = new Array(n).fill(null);
+  for (let i = period; i < n; i++) out[i] = ((closes[i] - closes[i - period]) / closes[i - period]) * 100;
+  return out;
+}
+
+// True Strength Index (double lissage EMA du momentum, 25/13 par défaut).
+function calcTSI(closes, longPeriod = 25, shortPeriod = 13) {
+  const n = closes.length;
+  const momentum = new Array(n).fill(0);
+  for (let i = 1; i < n; i++) momentum[i] = closes[i] - closes[i - 1];
+  const emaMomentumDouble = calcEMA(calcEMA(momentum, longPeriod), shortPeriod);
+  const absMomentum = momentum.map((m) => Math.abs(m));
+  const emaAbsDouble = calcEMA(calcEMA(absMomentum, longPeriod), shortPeriod);
+  return emaMomentumDouble.map((v, i) => (emaAbsDouble[i] ? (100 * v) / emaAbsDouble[i] : null));
+}
+
+// Awesome Oscillator = SMA5(prix médian) − SMA34(prix médian).
+function calcAwesomeOscillator(history) {
+  const median = history.map((h) => (h.high + h.low) / 2);
+  const sma5 = calcSMA(median, 5);
+  const sma34 = calcSMA(median, 34);
+  return median.map((_, i) => (sma5[i] != null && sma34[i] != null ? sma5[i] - sma34[i] : null));
+}
+
+// --- Volatility ---
+
+function calcBollingerBands(closes, period = 20, stdDevMult = 2) {
+  const n = closes.length;
+  const middle = calcSMA(closes, period);
+  const upper = new Array(n).fill(null);
+  const lower = new Array(n).fill(null);
+  for (let i = period - 1; i < n; i++) {
+    const windowSlice = closes.slice(i - period + 1, i + 1);
+    const mean = middle[i];
+    const variance = windowSlice.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / period;
+    const sd = Math.sqrt(variance);
+    upper[i] = mean + stdDevMult * sd;
+    lower[i] = mean - stdDevMult * sd;
+  }
+  return { upper, middle, lower };
+}
+
+function calcKeltnerChannels(history, closes, period = 20, atrMult = 2) {
+  const middle = calcEMA(closes, period);
+  const atr = calcATR(history, period);
+  return {
+    upper: middle.map((m, i) => (atr[i] != null ? m + atrMult * atr[i] : null)),
+    middle,
+    lower: middle.map((m, i) => (atr[i] != null ? m - atrMult * atr[i] : null)),
+  };
+}
+
+function calcStdDev(closes, period = 20) {
+  const n = closes.length;
+  const out = new Array(n).fill(null);
+  for (let i = period - 1; i < n; i++) {
+    const windowSlice = closes.slice(i - period + 1, i + 1);
+    const mean = windowSlice.reduce((a, b) => a + b, 0) / period;
+    const variance = windowSlice.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / period;
+    out[i] = Math.sqrt(variance);
+  }
+  return out;
+}
+
+// Choppiness Index : >61.8 = marché en range (pas de tendance fiable),
+// <38.2 = marché directionnel. Entre les deux : zone de transition.
+function calcChoppinessIndex(history, period = 14) {
+  const n = history.length;
+  const tr = calcTrueRange(history);
+  const out = new Array(n).fill(null);
+  for (let i = period - 1; i < n; i++) {
+    const trSum = tr.slice(i - period + 1, i + 1).reduce((a, b) => a + b, 0);
+    const windowSlice = history.slice(i - period + 1, i + 1);
+    const highestHigh = Math.max(...windowSlice.map((h) => h.high));
+    const lowestLow = Math.min(...windowSlice.map((h) => h.low));
+    const range = highestHigh - lowestLow;
+    out[i] = range === 0 ? 0 : (100 * Math.log10(trSum / range)) / Math.log10(period);
+  }
+  return out;
+}
+
+function classifyMarketRegime(adxVal, choppinessVal) {
+  if (choppinessVal != null && choppinessVal > 61.8) return "range";
+  if (adxVal != null && adxVal > 25) return "tendance";
+  return "transition";
+}
+
 // DMI / ADX façon Wilder.
 function calcADX(history, period = 14) {
   const n = history.length;
@@ -478,8 +759,64 @@ async function runMarketAnalysis(type, query) {
   const rsi = calcRSI(closes, 14)[lastIdx];
   const atr = calcATR(history, 14)[lastIdx];
 
+  // ---- Pass 1 : nouveaux indicateurs (Trend / Momentum / Volatility) ----
+  const smaLast = calcSMA(closes, 50)[lastIdx];
+  const hmaSeries = calcHMA(closes, 20);
+  const hmaLast = hmaSeries[lastIdx];
+  const hmaPrev = hmaSeries[lastIdx - 1];
+
+  const { macdLine, signalLine, histogram } = calcMACD(closes);
+  const macdLast = macdLine[lastIdx];
+  const macdSignalLast = signalLine[lastIdx];
+  const macdHistLast = histogram[lastIdx];
+
+  const supertrend = calcSupertrend(history, 10, 3);
+  const supertrendLast = supertrend.trend[lastIdx];
+
+  const aroon = calcAroon(history, 25);
+  const aroonUpLast = aroon.aroonUp[lastIdx];
+  const aroonDownLast = aroon.aroonDown[lastIdx];
+
+  const psar = calcParabolicSAR(history);
+  const psarLast = psar.sar[lastIdx];
+
+  const stochastic = calcStochastic(history);
+  const stochKLast = stochastic.k[lastIdx];
+  const stochDLast = stochastic.d[lastIdx];
+
+  const williamsRLast = calcWilliamsR(history)[lastIdx];
+  const cciLast = calcCCI(history)[lastIdx];
+  const rocLast = calcROC(closes)[lastIdx];
+  const tsiLast = calcTSI(closes)[lastIdx];
+  const aoSeries = calcAwesomeOscillator(history);
+  const aoLast = aoSeries[lastIdx];
+  const aoPrev = aoSeries[lastIdx - 1];
+
+  const bb = calcBollingerBands(closes);
+  const bbUpperLast = bb.upper[lastIdx];
+  const bbLowerLast = bb.lower[lastIdx];
+
+  const keltner = calcKeltnerChannels(history, closes);
+  const keltnerUpperLast = keltner.upper[lastIdx];
+  const keltnerLowerLast = keltner.lower[lastIdx];
+
+  const stdDevLast = calcStdDev(closes)[lastIdx];
+  const choppinessLast = calcChoppinessIndex(history)[lastIdx];
+  const marketRegime = classifyMarketRegime(adxLast, choppinessLast);
+
+  const atrSeriesAll = calcATR(history, 14).filter((v) => v != null);
+  const atrAvg = atrSeriesAll.length ? atrSeriesAll.reduce((a, b) => a + b, 0) / atrSeriesAll.length : null;
+  const volRegime =
+    atrAvg != null && atr != null
+      ? atr > atrAvg * 1.3
+        ? "élevée"
+        : atr < atrAvg * 0.7
+        ? "faible"
+        : "normale"
+      : null;
+
   // --- Vote multi-facteurs : chaque brique contribue 1 point (0.5 pour un
-  // BOS de confirmation) au camp haussier ou baissier. ---
+  // signal de confirmation secondaire) au camp haussier ou baissier. ---
   let bull = 0, bear = 0;
 
   if (ema20 != null && ema50 != null) {
@@ -513,6 +850,35 @@ async function runMarketAnalysis(type, query) {
   if (news?.label === "positif") bull += 1;
   else if (news?.label === "négatif") bear += 1;
 
+  // MACD : croisement ligne MACD / ligne signal, confirmé par l'histogramme.
+  if (macdLast != null && macdSignalLast != null) {
+    if (macdLast > macdSignalLast && macdHistLast > 0) bull += 1;
+    else if (macdLast < macdSignalLast && macdHistLast < 0) bear += 1;
+  }
+
+  // Supertrend : direction de la tendance.
+  if (supertrendLast === "up") bull += 1;
+  else if (supertrendLast === "down") bear += 1;
+
+  // Signaux de confirmation secondaires (poids réduit, pour ne pas noyer
+  // les signaux principaux ci-dessus) : SAR, Aroon, CCI, pente de la HMA.
+  if (psarLast != null) {
+    if (currentPrice > psarLast) bull += 0.5;
+    else bear += 0.5;
+  }
+  if (aroonUpLast != null && aroonDownLast != null) {
+    if (aroonUpLast > 70 && aroonUpLast > aroonDownLast) bull += 0.5;
+    else if (aroonDownLast > 70 && aroonDownLast > aroonUpLast) bear += 0.5;
+  }
+  if (cciLast != null) {
+    if (cciLast > 100) bull += 0.5;
+    else if (cciLast < -100) bear += 0.5;
+  }
+  if (hmaLast != null && hmaPrev != null) {
+    if (hmaLast > hmaPrev) bull += 0.5;
+    else if (hmaLast < hmaPrev) bear += 0.5;
+  }
+
   let verdict = "mitigé";
   if (bull - bear >= 2) verdict = "haussier";
   else if (bear - bull >= 2) verdict = "baissier";
@@ -522,6 +888,14 @@ async function runMarketAnalysis(type, query) {
   // ramené à "mitigé" pour éviter d'entrer trop tard sur le mouvement.
   if (verdict === "haussier" && rsi != null && rsi > 75) verdict = "mitigé";
   if (verdict === "baissier" && rsi != null && rsi < 25) verdict = "mitigé";
+
+  // Stochastique : même logique de garde-fou que le RSI.
+  if (verdict === "haussier" && stochKLast != null && stochKLast > 80) verdict = "mitigé";
+  if (verdict === "baissier" && stochKLast != null && stochKLast < 20) verdict = "mitigé";
+
+  // Choppiness Index > 61.8 : marché en range, aucune tendance fiable —
+  // on neutralise le verdict quel que soit le score des autres briques.
+  if (choppinessLast != null && choppinessLast > 61.8) verdict = "mitigé";
 
   const support = structure.support;
   const resistance = structure.resistance;
@@ -541,6 +915,14 @@ async function runMarketAnalysis(type, query) {
 
   const reasoning = [
     trendLabel && `EMA20/EMA50 : tendance ${trendLabel}`,
+    smaLast != null && `SMA(50) : $${smaLast.toFixed(2)} — prix ${currentPrice > smaLast ? "au-dessus" : "en-dessous"}`,
+    hmaLast != null &&
+      `HMA(20) : $${hmaLast.toFixed(2)}, pente ${hmaPrev != null ? (hmaLast > hmaPrev ? "haussière" : "baissière") : "n/a"}`,
+    macdLast != null &&
+      `MACD(12,26,9) : ligne ${macdLast.toFixed(2)} vs signal ${macdSignalLast.toFixed(2)}, histogramme ${macdHistLast > 0 ? "positif" : "négatif"}`,
+    supertrendLast && `Supertrend(10,3) : tendance ${supertrendLast === "up" ? "haussière" : "baissière"}`,
+    aroonUpLast != null && `Aroon(25) : Up ${aroonUpLast.toFixed(0)} / Down ${aroonDownLast.toFixed(0)}`,
+    psarLast != null && `Parabolic SAR : $${psarLast.toFixed(2)} (prix ${currentPrice > psarLast ? "au-dessus" : "en-dessous"})`,
     adxLast != null &&
       `ADX ${adxLast.toFixed(0)} (${adxLast > 20 ? "tendance significative" : "pas de tendance nette"}), +DI ${plusDILast?.toFixed(0)} / -DI ${minusDILast?.toFixed(0)}`,
     cloudTop != null
@@ -550,8 +932,25 @@ async function runMarketAnalysis(type, query) {
     support != null && `Support (swing low) : $${support.toFixed(2)} — Résistance (swing high) : $${resistance.toFixed(2)}`,
     rsi != null &&
       `RSI(14) : ${rsi.toFixed(0)}${rsi > 75 ? " — suracheté, prudence" : rsi < 25 ? " — survendu, prudence" : ""}`,
+    stochKLast != null &&
+      `Stochastique(14,3,3) : %K ${stochKLast.toFixed(0)} / %D ${stochDLast != null ? stochDLast.toFixed(0) : "n/a"}${stochKLast > 80 ? " — suracheté" : stochKLast < 20 ? " — survendu" : ""}`,
+    williamsRLast != null &&
+      `Williams %R(14) : ${williamsRLast.toFixed(0)}${williamsRLast > -20 ? " — suracheté" : williamsRLast < -80 ? " — survendu" : ""}`,
+    cciLast != null &&
+      `CCI(20) : ${cciLast.toFixed(0)}${cciLast > 100 ? " — zone haussière extrême" : cciLast < -100 ? " — zone baissière extrême" : ""}`,
+    rocLast != null && `ROC(12) : ${rocLast > 0 ? "+" : ""}${rocLast.toFixed(1)}%`,
+    tsiLast != null && `TSI(25,13) : ${tsiLast.toFixed(0)}`,
+    aoLast != null &&
+      `Awesome Oscillator : ${aoLast > 0 ? "positif" : "négatif"}${aoPrev != null ? (aoLast > aoPrev ? ", en hausse" : ", en baisse") : ""}`,
+    bbUpperLast != null &&
+      `Bollinger Bands(20,2) : prix ${currentPrice > bbUpperLast ? "au-dessus de la bande haute" : currentPrice < bbLowerLast ? "en-dessous de la bande basse" : "dans le canal"} ($${bbLowerLast.toFixed(2)} – $${bbUpperLast.toFixed(2)})`,
+    keltnerUpperLast != null &&
+      `Keltner Channels(20, 2×ATR) : $${keltnerLowerLast.toFixed(2)} – $${keltnerUpperLast.toFixed(2)}`,
+    stdDevLast != null && `Écart-type(20) des clôtures : $${stdDevLast.toFixed(2)}`,
+    choppinessLast != null && `Choppiness Index(14) : ${choppinessLast.toFixed(0)}`,
+    `Régime de marché : ${marketRegime}${volRegime ? ` — volatilité ${volRegime}` : ""}`,
     atr != null &&
-      `ATR(14) : $${atr.toFixed(2)} (volatilité${type === "crypto" ? ", approximée en clôture-à-clôture faute d'OHLC gratuit" : ""})`,
+      `ATR(14) : $${atr.toFixed(2)}${atrAvg != null ? ` (moyenne : $${atrAvg.toFixed(2)})` : ""}${type === "crypto" ? " — approximé en clôture-à-clôture faute d'OHLC gratuit" : ""}`,
     news
       ? `Actualités : ton ${news.label} sur ${news.articleCount} articles récents`
       : newsError
