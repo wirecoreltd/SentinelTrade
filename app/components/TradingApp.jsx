@@ -824,11 +824,14 @@ function PrixNiveaux({ prefill, setTab, setPrefillCalc }) {
 
           <button
             onClick={() => {
-              setPrefillCalc(
-                result.support != null
-                  ? { entry: result.price, stop: result.support }
-                  : { entry: result.price }
-              );
+              setPrefillCalc({
+                entry: result.price,
+                stop: result.support != null ? result.support : "",
+                takeProfit: result.resistance != null ? result.resistance : "",
+                assetType: type === "crypto" ? "crypto" : type === "fx" && isMetal(q) ? "matieres" : type === "fx" ? "forex" : "actions",
+                direction: "long",
+                symbol: result.symbol,
+              });
               setTab("calc");
             }}
             style={{
@@ -974,17 +977,21 @@ function Dossier({ setTab, setPrefillCalc }) {
 
           <button
             onClick={() => {
-              setPrefillCalc(
-                dossier.support != null
-                  ? {
-                      entry: dossier.price,
-                      stop:
-                        dossier.verdict === "baissier"
-                          ? dossier.atrStopShort ?? dossier.resistance
-                          : dossier.atrStop ?? dossier.support,
-                    }
-                  : { entry: dossier.price }
-              );
+              setPrefillCalc({
+                entry: dossier.price,
+                stop:
+                  dossier.verdict === "baissier"
+                    ? dossier.atrStopShort ?? dossier.resistance
+                    : dossier.atrStop ?? dossier.support,
+                takeProfit:
+                  dossier.verdict === "baissier"
+                    ? dossier.support
+                    : dossier.resistance,
+                assetType: type === "crypto" ? "crypto" : type === "fx" && isMetal(query) ? "matieres" : type === "fx" ? "forex" : "actions",
+                direction: dossier.verdict === "baissier" ? "short" : "long",
+                symbol: dossier.symbol,
+                verdict: dossier.verdict,
+              });
               setTab("calc");
             }}
             style={{
@@ -1190,19 +1197,29 @@ function TopMarkets({ onSendToCalculator }) {
 
             const action = ACTION_MAP[r.verdict] || ACTION_MAP["mitigé"];
             const hasLevels = r.support != null && r.resistance != null;
-            const buyPrice = hasLevels ? r.support : r.price;
-            const sellPrice = hasLevels ? r.resistance : null;
-            const stopPrice = hasLevels ? r.atrStop ?? buyPrice * 0.98 : null;
+            const isBullish = r.verdict === "haussier";
+            const isBearish = r.verdict === "baissier";
+            // L'entrée automatique est le prix courant. Support/résistance servent
+            // aux niveaux de sortie et de protection.
+            const buyPrice = r.price;
+            const sellPrice = hasLevels ? (isBullish ? r.resistance : r.support) : null;
+            const stopPrice = isBearish
+              ? r.atrStopShort ?? r.resistance
+              : r.atrStop ?? r.support;
 
             return (
               <button
                 key={`${r.type}-${r.query}`}
                 onClick={() =>
-                  onSendToCalculator(
-                    hasLevels
-                      ? { entry: buyPrice, stop: stopPrice, takeProfit: sellPrice }
-                      : { entry: buyPrice }
-                  )
+                  onSendToCalculator({
+                    entry: buyPrice,
+                    stop: stopPrice,
+                    takeProfit: sellPrice,
+                    assetType: r.type === "crypto" ? "crypto" : r.type === "fx" && isMetal(r.query) ? "matieres" : r.type === "fx" ? "forex" : "actions",
+                    direction: isBearish ? "short" : "long",
+                    symbol: r.symbol || r.query.toUpperCase(),
+                    verdict: r.verdict,
+                  })
                 }
                 style={{
                   background: PANEL,
@@ -1269,7 +1286,7 @@ const LEVERAGE_PRESETS = {
 
 // Défini en dehors de Calculateur : sinon React recrée ce composant à
 // chaque frappe et l'input perd le focus après chaque caractère.
-function CalcField({ label, value, onChange, placeholder }) {
+function CalcField({ label, value, onChange, placeholder, readOnly = false }) {
   return (
     <div style={{ marginBottom: 12 }}>
       <div style={{ fontSize: 12, color: MUTED, marginBottom: 4 }}>{label}</div>
@@ -1277,6 +1294,7 @@ function CalcField({ label, value, onChange, placeholder }) {
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
+        readOnly={readOnly}
         inputMode="decimal"
         style={{ width: "100%", background: NAVY, border: `1px solid ${LINE}`, borderRadius: 8, padding: "10px 12px", color: TEXT, fontSize: 14 }}
       />
@@ -1285,17 +1303,24 @@ function CalcField({ label, value, onChange, placeholder }) {
 }
 
 function Calculateur({ prefill }) {
-  const [assetType, setAssetType] = useState("crypto");
-  const [invested, setInvested] = useState("50");
-  const [leverage, setLeverage] = useState(LEVERAGE_PRESETS.crypto.leverage.toString());
+  const [mode, setMode] = useState(prefill ? "auto" : "manual");
+  const [assetType, setAssetType] = useState(prefill?.assetType || "crypto");
+  const [invested, setInvested] = useState(prefill?.invested?.toString() || "50");
+  const [leverage, setLeverage] = useState(prefill?.leverage?.toString() || LEVERAGE_PRESETS[prefill?.assetType || "crypto"].leverage.toString());
   const [entry, setEntry] = useState(prefill?.entry?.toString() || "");
   const [stop, setStop] = useState(prefill?.stop?.toString() || "");
   const [takeProfit, setTakeProfit] = useState(prefill?.takeProfit?.toString() || "");
 
   useEffect(() => {
-    if (prefill?.entry) setEntry(prefill.entry.toString());
-    if (prefill?.stop) setStop(prefill.stop.toString());
-    if (prefill?.takeProfit) setTakeProfit(prefill.takeProfit.toString());
+    if (!prefill) return;
+    const nextAsset = prefill.assetType || "crypto";
+    setMode("auto");
+    setAssetType(nextAsset);
+    setInvested(prefill.invested?.toString() || "50");
+    setLeverage(prefill.leverage?.toString() || LEVERAGE_PRESETS[nextAsset].leverage.toString());
+    setEntry(prefill.entry?.toString() || "");
+    setStop(prefill.stop?.toString() || "");
+    setTakeProfit(prefill.takeProfit?.toString() || "");
   }, [prefill]);
 
   const onAssetType = (t) => {
@@ -1303,117 +1328,74 @@ function Calculateur({ prefill }) {
     setLeverage(LEVERAGE_PRESETS[t].leverage.toString());
   };
 
+  const autoLocked = mode === "auto";
   const inv = parseFloat(invested);
   const lev = parseFloat(leverage);
   const e = parseFloat(entry);
   const s = parseFloat(stop);
   const tp = parseFloat(takeProfit);
-
   const valid = inv > 0 && lev > 0 && e > 0 && s > 0 && e !== s;
-  const positionValue = valid ? inv * lev : null; // taille totale de la position en €
-  const quantity = valid ? positionValue / e : null; // à saisir dans le champ "Taille"/"Quantité" du broker
-  const distance = valid ? Math.abs(e - s) : null; // "Distance" du stop, comme sur Capital.com
-  const distancePct = valid ? (distance / e) * 100 : null; // "Distance (%)"
+  const positionValue = valid ? inv * lev : null;
+  const quantity = valid ? positionValue / e : null;
+  const distance = valid ? Math.abs(e - s) : null;
+  const distancePct = valid ? (distance / e) * 100 : null;
   const lossAmount = valid ? quantity * distance : null;
   const lossPctOfInvested = valid ? (lossAmount / inv) * 100 : null;
   const gainAmount = valid && tp > 0 ? quantity * Math.abs(tp - e) : null;
   const gainDistance = valid && tp > 0 ? Math.abs(tp - e) : null;
   const gainDistancePct = valid && tp > 0 ? (gainDistance / e) * 100 : null;
 
+  const field = (label, value, onChange, placeholder, locked = autoLocked) => (
+    <CalcField label={label} value={value} onChange={onChange} placeholder={placeholder} readOnly={locked} />
+  );
+
   return (
     <div>
+      <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
+        <button onClick={() => setMode("auto")} style={{ flex: 1, padding: "9px 10px", borderRadius: 8, border: `1px solid ${mode === "auto" ? ACCENT : LINE}`, background: mode === "auto" ? "rgba(79,140,255,0.12)" : "transparent", color: mode === "auto" ? ACCENT : MUTED, fontWeight: 700, fontSize: 13, cursor: "pointer" }}>⚡ Automatique — Signal</button>
+        <button onClick={() => setMode("manual")} style={{ flex: 1, padding: "9px 10px", borderRadius: 8, border: `1px solid ${mode === "manual" ? ACCENT : LINE}`, background: mode === "manual" ? "rgba(79,140,255,0.12)" : "transparent", color: mode === "manual" ? ACCENT : MUTED, fontWeight: 700, fontSize: 13, cursor: "pointer" }}>✎ Manuel</button>
+      </div>
+
+      {prefill?.symbol && (
+        <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: 12, marginBottom: 14 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div><div style={{ fontSize: 11, color: MUTED }}>Marché sélectionné</div><div style={{ fontSize: 16, fontWeight: 700 }}>{prefill.symbol}</div></div>
+            {prefill.verdict && <div style={{ fontSize: 12, fontWeight: 800, color: prefill.verdict === "haussier" ? POS : prefill.verdict === "baissier" ? NEG : MUTED, textTransform: "uppercase" }}>{prefill.verdict}</div>}
+          </div>
+          {autoLocked && <div style={{ fontSize: 11, color: MUTED, marginTop: 6 }}>Valeurs issues du moteur d'analyse et verrouillées.</div>}
+        </div>
+      )}
+
       <div style={{ fontSize: 12, color: MUTED, marginBottom: 6 }}>Type d'actif (fixe le levier par défaut)</div>
       <div style={{ display: "flex", gap: 6, marginBottom: 14, flexWrap: "wrap" }}>
         {Object.entries(LEVERAGE_PRESETS).map(([key, v]) => (
-          <button
-            key={key}
-            onClick={() => onAssetType(key)}
-            style={{
-              padding: "6px 10px",
-              borderRadius: 20,
-              border: `1px solid ${assetType === key ? ACCENT : LINE}`,
-              background: assetType === key ? "rgba(79,140,255,0.12)" : "transparent",
-              color: assetType === key ? ACCENT : MUTED,
-              fontSize: 12,
-              fontWeight: 600,
-              cursor: "pointer",
-            }}
-          >
-            {v.label}
-          </button>
+          <button key={key} onClick={() => onAssetType(key)} disabled={autoLocked} style={{ padding: "6px 10px", borderRadius: 20, border: `1px solid ${assetType === key ? ACCENT : LINE}`, background: assetType === key ? "rgba(79,140,255,0.12)" : "transparent", color: assetType === key ? ACCENT : MUTED, fontSize: 12, fontWeight: 600, cursor: autoLocked ? "not-allowed" : "pointer", opacity: autoLocked && assetType !== key ? 0.55 : 1 }}>{v.label}</button>
         ))}
       </div>
 
-      <CalcField label="Montant à investir — ta mise / marge (€)" value={invested} onChange={setInvested} placeholder="ex: 50" />
-      <CalcField label="Levier (x1 = sans levier, ex: Binance spot)" value={leverage} onChange={setLeverage} placeholder="ex: 2" />
-      <CalcField label="Prix d'entrée" value={entry} onChange={setEntry} placeholder="ex: 4346.55" />
-      <CalcField label="Stop-loss" value={stop} onChange={setStop} placeholder="ex: 4300.00" />
-      <CalcField label="Take-profit (optionnel)" value={takeProfit} onChange={setTakeProfit} placeholder="ex: 4420.00" />
+      {field("Montant à investir — ta mise / marge (€)", invested, setInvested, "ex: 50")}
+      {field("Levier (x1 = sans levier, ex: Binance spot)", leverage, setLeverage, "ex: 2")}
+      {field("Prix d'entrée", entry, setEntry, "ex: 4346.55")}
+      {field("Stop-loss", stop, setStop, "ex: 4300.00")}
+      {field("Take-profit (optionnel)", takeProfit, setTakeProfit, "ex: 4420.00")}
 
       {valid ? (
         <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 16, marginTop: 8 }}>
           <div style={{ marginBottom: 12, paddingBottom: 12, borderBottom: `1px solid ${LINE}` }}>
-            <div style={{ fontSize: 12, color: ACCENT, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 6 }}>
-              À saisir sur Capital.com / Binance
-            </div>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-              <span style={{ fontSize: 13, color: MUTED }}>Taille</span>
-              <span style={{ fontSize: 16, fontWeight: 700, color: ACCENT }}>{quantity.toFixed(6)}</span>
-            </div>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}>
-              <span style={{ fontSize: 13, color: MUTED }}>Stop loss — Niveau de prix</span>
-              <span style={{ fontSize: 14, fontWeight: 700 }}>{s}</span>
-            </div>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-              <span style={{ fontSize: 11, color: MUTED }}>Distance</span>
-              <span style={{ fontSize: 12, color: MUTED }}>
-                {distance.toFixed(2)} ({distancePct.toFixed(2)}%)
-              </span>
-            </div>
-            {tp > 0 && (
-              <>
-                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}>
-                  <span style={{ fontSize: 13, color: MUTED }}>Take-profit — Niveau de prix</span>
-                  <span style={{ fontSize: 14, fontWeight: 700 }}>{tp}</span>
-                </div>
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
-                  <span style={{ fontSize: 11, color: MUTED }}>Distance</span>
-                  <span style={{ fontSize: 12, color: MUTED }}>
-                    {gainDistance.toFixed(2)} ({gainDistancePct.toFixed(2)}%)
-                  </span>
-                </div>
-              </>
-            )}
+            <div style={{ fontSize: 12, color: ACCENT, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 6 }}>À saisir sur Capital.com / Binance</div>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}><span style={{ fontSize: 13, color: MUTED }}>Taille</span><span style={{ fontSize: 16, fontWeight: 700, color: ACCENT }}>{quantity.toFixed(6)}</span></div>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}><span style={{ fontSize: 13, color: MUTED }}>Stop loss — Niveau de prix</span><span style={{ fontSize: 14, fontWeight: 700 }}>{s}</span></div>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}><span style={{ fontSize: 11, color: MUTED }}>Distance</span><span style={{ fontSize: 12, color: MUTED }}>{distance.toFixed(2)} ({distancePct.toFixed(2)}%)</span></div>
+            {tp > 0 && <><div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}><span style={{ fontSize: 13, color: MUTED }}>Take-profit — Niveau de prix</span><span style={{ fontSize: 14, fontWeight: 700 }}>{tp}</span></div><div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: 11, color: MUTED }}>Distance</span><span style={{ fontSize: 12, color: MUTED }}>{gainDistance.toFixed(2)} ({gainDistancePct.toFixed(2)}%)</span></div></>}
           </div>
-
-          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
-            <span style={{ fontSize: 13, color: MUTED }}>Taille totale de la position</span>
-            <span style={{ fontSize: 14, fontWeight: 700 }}>{positionValue.toFixed(2)} €</span>
-          </div>
-          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
-            <span style={{ fontSize: 13, color: MUTED }}>Marge requise</span>
-            <span style={{ fontSize: 14, fontWeight: 700 }}>{inv.toFixed(2)} €</span>
-          </div>
-          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
-            <span style={{ fontSize: 13, color: MUTED }}>Perte si stop touché</span>
-            <span style={{ fontSize: 14, fontWeight: 700, color: NEG }}>
-              -{lossAmount.toFixed(2)} € ({lossPctOfInvested.toFixed(0)}% de ta mise)
-            </span>
-          </div>
-          {gainAmount !== null && (
-            <div style={{ display: "flex", justifyContent: "space-between" }}>
-              <span style={{ fontSize: 13, color: MUTED }}>Gain si take-profit touché</span>
-              <span style={{ fontSize: 14, fontWeight: 700, color: POS }}>+{gainAmount.toFixed(2)} €</span>
-            </div>
-          )}
-          {lossPctOfInvested > 100 && (
-            <div style={{ fontSize: 11, color: NEG, marginTop: 10 }}>
-              ⚠️ La perte potentielle dépasse ta mise de départ — avec ce levier, ta position peut être liquidée avant que le stop ne soit atteint. Réduis le levier ou resserre le stop.
-            </div>
-          )}
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}><span style={{ fontSize: 13, color: MUTED }}>Taille totale de la position</span><span style={{ fontSize: 14, fontWeight: 700 }}>{positionValue.toFixed(2)} €</span></div>
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}><span style={{ fontSize: 13, color: MUTED }}>Marge requise</span><span style={{ fontSize: 14, fontWeight: 700 }}>{inv.toFixed(2)} €</span></div>
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}><span style={{ fontSize: 13, color: MUTED }}>Perte si stop touché</span><span style={{ fontSize: 14, fontWeight: 700, color: NEG }}>-{lossAmount.toFixed(2)} € ({lossPctOfInvested.toFixed(0)}% de ta mise)</span></div>
+          {gainAmount !== null && <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: 13, color: MUTED }}>Gain si take-profit touché</span><span style={{ fontSize: 14, fontWeight: 700, color: POS }}>+{gainAmount.toFixed(2)} €</span></div>}
+          {lossPctOfInvested > 100 && <div style={{ fontSize: 11, color: NEG, marginTop: 10 }}>⚠️ La perte potentielle dépasse ta mise de départ — avec ce levier, ta position peut être liquidée avant que le stop ne soit atteint. Réduis le levier ou resserre le stop.</div>}
         </div>
       ) : (
-        <div style={{ fontSize: 12, color: MUTED, marginTop: 8 }}>Remplis montant, levier, entrée et stop-loss pour voir le calcul.</div>
+        <div style={{ fontSize: 12, color: MUTED, marginTop: 8 }}>{autoLocked && prefill?.symbol ? "Le moteur n'a pas fourni tous les niveaux nécessaires pour calculer automatiquement ce trade. Passe en mode Manuel pour définir les niveaux." : "Remplis montant, levier, entrée et stop-loss pour voir le calcul."}</div>
       )}
     </div>
   );
