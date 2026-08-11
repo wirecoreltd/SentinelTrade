@@ -69,7 +69,11 @@ async function fetchCoinGeckoHistory(id, days) {
   );
   if (!res.ok) throw new Error("Historique crypto indisponible");
   const data = await res.json();
-  return data.prices.map(([ts, price]) => ({ date: ts, close: price }));
+  // CoinGecko market_chart ne fournit qu'un prix de clôture par jour, pas de
+  // vraies bougies OHLC. On approxime high = low = close : l'ATR/ADX calculés
+  // dessus sont donc une volatilité clôture-à-clôture, pas une vraie amplitude
+  // intrajournalière. C'est signalé dans le raisonnement du Dossier.
+  return data.prices.map(([ts, price]) => ({ date: ts, close: price, high: price, low: price }));
 }
 
 async function fetchCoinGeckoTop(n = 10) {
@@ -105,7 +109,12 @@ async function fetchAlphaHistory(symbol) {
     throw new Error(reason || "Historique indisponible");
   }
   return Object.entries(series)
-    .map(([date, v]) => ({ date, close: parseFloat(v["4. close"]) }))
+    .map(([date, v]) => ({
+      date,
+      close: parseFloat(v["4. close"]),
+      high: parseFloat(v["2. high"]),
+      low: parseFloat(v["3. low"]),
+    }))
     .sort((a, b) => new Date(a.date) - new Date(b.date));
 }
 
@@ -132,7 +141,12 @@ async function fetchFxHistory(symbol) {
     throw new Error(reason || "Historique indisponible");
   }
   return Object.entries(series)
-    .map(([date, v]) => ({ date, close: parseFloat(v["4. close"]) }))
+    .map(([date, v]) => ({
+      date,
+      close: parseFloat(v["4. close"]),
+      high: parseFloat(v["2. high"]),
+      low: parseFloat(v["3. low"]),
+    }))
     .sort((a, b) => new Date(a.date) - new Date(b.date));
 }
 
@@ -179,6 +193,198 @@ function supportResistance(history) {
   return { support: Math.min(...closes), resistance: Math.max(...closes) };
 }
 
+// ---------- Analyse technique ----------
+// Socle volontairement restreint (plutôt que d'empiler tous les indicateurs
+// possibles) : EMA + ADX/DMI + Ichimoku + structure de marché pour la
+// direction, RSI comme filtre de prudence (pas un signal directionnel), ATR
+// pour dimensionner le stop-loss selon la volatilité réelle plutôt qu'un
+// pourcentage fixe.
+
+function calcEMA(values, period) {
+  const k = 2 / (period + 1);
+  const out = [];
+  let prev;
+  values.forEach((v, i) => {
+    prev = i === 0 ? v : v * k + prev * (1 - k);
+    out.push(prev);
+  });
+  return out;
+}
+
+function calcTrueRange(history) {
+  return history.map((h, i) => {
+    if (i === 0) return h.high - h.low;
+    const prevClose = history[i - 1].close;
+    return Math.max(h.high - h.low, Math.abs(h.high - prevClose), Math.abs(h.low - prevClose));
+  });
+}
+
+// ATR lissé façon Wilder (14 périodes par défaut). Tableau aligné sur
+// l'historique, null tant qu'il n'y a pas assez de données.
+function calcATR(history, period = 14) {
+  const tr = calcTrueRange(history);
+  const out = new Array(history.length).fill(null);
+  if (tr.length <= period) return out;
+  let atr = tr.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  out[period - 1] = atr;
+  for (let i = period; i < tr.length; i++) {
+    atr = (atr * (period - 1) + tr[i]) / period;
+    out[i] = atr;
+  }
+  return out;
+}
+
+// DMI / ADX façon Wilder.
+function calcADX(history, period = 14) {
+  const n = history.length;
+  const plusDM = new Array(n).fill(0);
+  const minusDM = new Array(n).fill(0);
+  const tr = calcTrueRange(history);
+  for (let i = 1; i < n; i++) {
+    const upMove = history[i].high - history[i - 1].high;
+    const downMove = history[i - 1].low - history[i].low;
+    plusDM[i] = upMove > downMove && upMove > 0 ? upMove : 0;
+    minusDM[i] = downMove > upMove && downMove > 0 ? downMove : 0;
+  }
+
+  function wilderSmooth(arr) {
+    const out = new Array(arr.length).fill(null);
+    if (arr.length <= period) return out;
+    let sum = arr.slice(1, period + 1).reduce((a, b) => a + b, 0);
+    out[period] = sum;
+    for (let i = period + 1; i < arr.length; i++) {
+      sum = out[i - 1] - out[i - 1] / period + arr[i];
+      out[i] = sum;
+    }
+    return out;
+  }
+
+  const smoothTR = wilderSmooth(tr);
+  const smoothPlusDM = wilderSmooth(plusDM);
+  const smoothMinusDM = wilderSmooth(minusDM);
+
+  const plusDI = smoothTR.map((v, i) => (v ? (100 * smoothPlusDM[i]) / v : null));
+  const minusDI = smoothTR.map((v, i) => (v ? (100 * smoothMinusDM[i]) / v : null));
+  const dx = plusDI.map((p, i) => {
+    const m = minusDI[i];
+    if (p == null || m == null || p + m === 0) return null;
+    return (100 * Math.abs(p - m)) / (p + m);
+  });
+
+  const firstValid = dx.findIndex((v) => v != null);
+  const adx = new Array(n).fill(null);
+  if (firstValid !== -1 && dx.length >= firstValid + period) {
+    let avg = dx.slice(firstValid, firstValid + period).reduce((a, b) => a + b, 0) / period;
+    adx[firstValid + period - 1] = avg;
+    for (let i = firstValid + period; i < n; i++) {
+      avg = (adx[i - 1] * (period - 1) + dx[i]) / period;
+      adx[i] = avg;
+    }
+  }
+
+  return { plusDI, minusDI, adx };
+}
+
+// RSI façon Wilder (14 périodes). Sert de garde-fou de prudence
+// (suracheté/survendu), pas de signal directionnel principal.
+function calcRSI(closes, period = 14) {
+  const out = new Array(closes.length).fill(null);
+  if (closes.length <= period) return out;
+  let gains = 0, losses = 0;
+  for (let i = 1; i <= period; i++) {
+    const diff = closes[i] - closes[i - 1];
+    if (diff >= 0) gains += diff; else losses -= diff;
+  }
+  let avgGain = gains / period;
+  let avgLoss = losses / period;
+  out[period] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
+  for (let i = period + 1; i < closes.length; i++) {
+    const diff = closes[i] - closes[i - 1];
+    const gain = diff > 0 ? diff : 0;
+    const loss = diff < 0 ? -diff : 0;
+    avgGain = (avgGain * (period - 1) + gain) / period;
+    avgLoss = (avgLoss * (period - 1) + loss) / period;
+    out[i] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
+  }
+  return out;
+}
+
+// Nuage d'Ichimoku. cloudTopAt(i)/cloudBottomAt(i) renvoient le nuage tel
+// qu'il serait affiché au jour i (projection standard de 26 périodes).
+function calcIchimoku(history) {
+  const highs = history.map((h) => h.high);
+  const lows = history.map((h) => h.low);
+
+  function rangeMid(period, idx) {
+    const start = Math.max(0, idx - period + 1);
+    const hSlice = highs.slice(start, idx + 1);
+    const lSlice = lows.slice(start, idx + 1);
+    return (Math.max(...hSlice) + Math.min(...lSlice)) / 2;
+  }
+
+  const tenkan = history.map((_, i) => rangeMid(9, i));
+  const kijun = history.map((_, i) => rangeMid(26, i));
+  const senkouARaw = history.map((_, i) => (tenkan[i] + kijun[i]) / 2);
+  const senkouBRaw = history.map((_, i) => rangeMid(52, i));
+
+  const cloudTopAt = (i) => {
+    const j = i - 26;
+    return j < 0 ? null : Math.max(senkouARaw[j], senkouBRaw[j]);
+  };
+  const cloudBottomAt = (i) => {
+    const j = i - 26;
+    return j < 0 ? null : Math.min(senkouARaw[j], senkouBRaw[j]);
+  };
+
+  return { cloudTopAt, cloudBottomAt };
+}
+
+// Points de swing (fractale à 5 barres) pour détecter la structure de
+// marché : Higher High/Higher Low = haussier, Lower High/Lower Low =
+// baissier. BOS = cassure dans le sens de la tendance (continuation).
+// CHOCH = cassure du côté opposé (signal de retournement potentiel).
+function detectMarketStructure(history, span = 2) {
+  const highs = history.map((h) => h.high);
+  const lows = history.map((h) => h.low);
+  const swingHighs = [];
+  const swingLows = [];
+
+  for (let i = span; i < history.length - span; i++) {
+    const windowH = highs.slice(i - span, i + span + 1);
+    const windowL = lows.slice(i - span, i + span + 1);
+    if (highs[i] === Math.max(...windowH)) swingHighs.push({ price: highs[i] });
+    if (lows[i] === Math.min(...windowL)) swingLows.push({ price: lows[i] });
+  }
+
+  if (swingHighs.length < 2 || swingLows.length < 2) {
+    return { regime: "indéterminé", bos: false, choch: false, support: null, resistance: null };
+  }
+
+  const lastHigh = swingHighs[swingHighs.length - 1];
+  const prevHigh = swingHighs[swingHighs.length - 2];
+  const lastLow = swingLows[swingLows.length - 1];
+  const prevLow = swingLows[swingLows.length - 2];
+
+  const higherHigh = lastHigh.price > prevHigh.price;
+  const higherLow = lastLow.price > prevLow.price;
+  const lowerHigh = lastHigh.price < prevHigh.price;
+  const lowerLow = lastLow.price < prevLow.price;
+
+  let regime = "range";
+  if (higherHigh && higherLow) regime = "haussier";
+  else if (lowerHigh && lowerLow) regime = "baissier";
+
+  const currentPrice = history[history.length - 1].close;
+  const bos =
+    (regime === "haussier" && currentPrice > lastHigh.price) ||
+    (regime === "baissier" && currentPrice < lastLow.price);
+  const choch =
+    (regime === "haussier" && currentPrice < lastLow.price) ||
+    (regime === "baissier" && currentPrice > lastHigh.price);
+
+  return { regime, bos, choch, support: lastLow.price, resistance: lastHigh.price };
+}
+
 // ---------- Moteur d'analyse partagé (Dossier + Top 15) ----------
 // Pour les devises classiques, on ne fait plus qu'UN SEUL appel Alpha Vantage
 // (l'historique) au lieu de deux : le dernier cours de la série sert de prix
@@ -198,7 +404,7 @@ async function runMarketAnalysis(type, query) {
   } else if (type === "fx") {
     const sym = query.toUpperCase();
     if (metal) {
-      // Or / argent : pas d'historique gratuit, donc pas de tendance de prix.
+      // Or / argent : pas d'historique gratuit, donc pas d'analyse technique.
       price = await fetchMetalPrice(sym);
       history = null;
     } else {
@@ -214,13 +420,6 @@ async function runMarketAnalysis(type, query) {
     ]);
   }
 
-  const t7 = history ? trendFromHistory(history, 7) : null;
-  const t30 = history ? trendFromHistory(history, 30) : null;
-  const t90 = history ? trendFromHistory(history, 90) : null;
-  const { support, resistance } = history
-    ? supportResistance(history.filter((h) => new Date(h.date).getTime() >= Date.now() - 30 * 86400000))
-    : { support: null, resistance: null };
-
   let news = null;
   let newsError = "";
   try {
@@ -229,29 +428,130 @@ async function runMarketAnalysis(type, query) {
     newsError = e.message;
   }
 
-  const trends = [t7, t30, t90].filter(Boolean);
-  let bullCount = trends.filter((t) => t.direction === "haussier").length;
-  let bearCount = trends.filter((t) => t.direction === "baissier").length;
-  if (news?.label === "positif") bullCount += 1;
-  if (news?.label === "négatif") bearCount += 1;
+  // Pas assez d'historique (or/argent, ou série trop courte) pour une
+  // analyse technique fiable : verdict basé uniquement sur les actualités.
+  if (!history || history.length < 60) {
+    let verdict = "mitigé";
+    if (news?.label === "positif") verdict = "haussier";
+    else if (news?.label === "négatif") verdict = "baissier";
+    const reasoning = [
+      history
+        ? "Historique insuffisant pour une analyse technique complète (moins de 60 jours) — verdict basé sur les actualités uniquement"
+        : "Historique de prix indisponible gratuitement pour l'or/l'argent — verdict basé sur les actualités uniquement",
+      news
+        ? `Actualités : ton ${news.label} sur ${news.articleCount} articles récents`
+        : newsError
+        ? `Actualités indisponibles : ${newsError}`
+        : "Actualités non incluses",
+    ];
+    return {
+      symbol: query.toUpperCase(),
+      price: price.price,
+      support: null,
+      resistance: null,
+      verdict,
+      score: news?.label === "positif" ? 1 : news?.label === "négatif" ? -1 : 0,
+      reasoning,
+      news,
+      atrStop: null,
+      atrStopShort: null,
+    };
+  }
+
+  const closes = history.map((h) => h.close);
+  const currentPrice = closes[closes.length - 1];
+  const lastIdx = history.length - 1;
+
+  const ema20 = calcEMA(closes, 20)[lastIdx];
+  const ema50 = calcEMA(closes, 50)[lastIdx];
+
+  const { plusDI, minusDI, adx } = calcADX(history, 14);
+  const adxLast = adx[lastIdx];
+  const plusDILast = plusDI[lastIdx];
+  const minusDILast = minusDI[lastIdx];
+
+  const ichimoku = calcIchimoku(history);
+  const cloudTop = ichimoku.cloudTopAt(lastIdx);
+  const cloudBottom = ichimoku.cloudBottomAt(lastIdx);
+
+  const structure = detectMarketStructure(history);
+  const rsi = calcRSI(closes, 14)[lastIdx];
+  const atr = calcATR(history, 14)[lastIdx];
+
+  // --- Vote multi-facteurs : chaque brique contribue 1 point (0.5 pour un
+  // BOS de confirmation) au camp haussier ou baissier. ---
+  let bull = 0, bear = 0;
+
+  if (ema20 != null && ema50 != null) {
+    if (currentPrice > ema20 && ema20 > ema50) bull += 1;
+    else if (currentPrice < ema20 && ema20 < ema50) bear += 1;
+  }
+
+  if (adxLast != null && adxLast > 20 && plusDILast != null && minusDILast != null) {
+    if (plusDILast > minusDILast) bull += 1;
+    else if (minusDILast > plusDILast) bear += 1;
+  }
+
+  if (cloudTop != null && cloudBottom != null) {
+    if (currentPrice > cloudTop) bull += 1;
+    else if (currentPrice < cloudBottom) bear += 1;
+  }
+
+  if (structure.regime === "haussier") bull += 1;
+  else if (structure.regime === "baissier") bear += 1;
+  if (structure.bos) {
+    if (structure.regime === "haussier") bull += 0.5;
+    else bear += 0.5;
+  }
+  if (structure.choch) {
+    // Une cassure du côté opposé à la tendance en cours est un signal de
+    // retournement : elle vote contre le camp de la tendance affichée.
+    if (structure.regime === "haussier") bear += 1;
+    else bull += 1;
+  }
+
+  if (news?.label === "positif") bull += 1;
+  else if (news?.label === "négatif") bear += 1;
 
   let verdict = "mitigé";
-  if (bullCount > bearCount) verdict = "haussier";
-  else if (bearCount > bullCount) verdict = "baissier";
+  if (bull - bear >= 2) verdict = "haussier";
+  else if (bear - bull >= 2) verdict = "baissier";
 
-  // Score continu (pour trier le Top 15) : moyenne des variations % sur les
-  // fenêtres disponibles, bonifiée/pénalisée par le sentiment des actus.
-  const avgPct = trends.length ? trends.reduce((sum, t) => sum + t.pct, 0) / trends.length : 0;
-  const newsScore = news?.label === "positif" ? 2 : news?.label === "négatif" ? -2 : 0;
-  const score = avgPct + newsScore;
+  // RSI = garde-fou de prudence, pas un signal directionnel : un verdict
+  // haussier sur un actif suracheté (ou baissier sur un actif survendu) est
+  // ramené à "mitigé" pour éviter d'entrer trop tard sur le mouvement.
+  if (verdict === "haussier" && rsi != null && rsi > 75) verdict = "mitigé";
+  if (verdict === "baissier" && rsi != null && rsi < 25) verdict = "mitigé";
+
+  const support = structure.support;
+  const resistance = structure.resistance;
+  // Stop-loss basé sur la volatilité réelle (ATR) plutôt qu'un pourcentage
+  // fixe : plus l'actif est volatil, plus le stop est éloigné de l'entrée.
+  const atrStop = support != null && atr != null ? support - 1.2 * atr : null;
+  const atrStopShort = resistance != null && atr != null ? resistance + 1.2 * atr : null;
+
+  const trendLabel =
+    ema20 != null && ema50 != null
+      ? currentPrice > ema20 && ema20 > ema50
+        ? "haussière"
+        : currentPrice < ema20 && ema20 < ema50
+        ? "baissière"
+        : "mixte"
+      : null;
 
   const reasoning = [
-    t7 && `Court terme (7j) : ${t7.direction} (${t7.pct > 0 ? "+" : ""}${t7.pct.toFixed(1)}%)`,
-    t30 && `Moyen terme (30j) : ${t30.direction} (${t30.pct > 0 ? "+" : ""}${t30.pct.toFixed(1)}%)`,
-    t90 && `Long terme (90j) : ${t90.direction} (${t90.pct > 0 ? "+" : ""}${t90.pct.toFixed(1)}%)`,
-    support != null
-      ? `Support 30j : $${support.toFixed(2)} — Résistance 30j : $${resistance.toFixed(2)}`
-      : "Historique de prix indisponible gratuitement pour l'or/l'argent — analyse basée sur le prix actuel et les actualités uniquement",
+    trendLabel && `EMA20/EMA50 : tendance ${trendLabel}`,
+    adxLast != null &&
+      `ADX ${adxLast.toFixed(0)} (${adxLast > 20 ? "tendance significative" : "pas de tendance nette"}), +DI ${plusDILast?.toFixed(0)} / -DI ${minusDILast?.toFixed(0)}`,
+    cloudTop != null
+      ? `Prix ${currentPrice > cloudTop ? "au-dessus" : currentPrice < cloudBottom ? "en-dessous" : "dans"} le nuage Ichimoku`
+      : null,
+    `Structure de marché : ${structure.regime}${structure.bos ? " — cassure de continuation (BOS)" : ""}${structure.choch ? " — signal de retournement (CHOCH)" : ""}`,
+    support != null && `Support (swing low) : $${support.toFixed(2)} — Résistance (swing high) : $${resistance.toFixed(2)}`,
+    rsi != null &&
+      `RSI(14) : ${rsi.toFixed(0)}${rsi > 75 ? " — suracheté, prudence" : rsi < 25 ? " — survendu, prudence" : ""}`,
+    atr != null &&
+      `ATR(14) : $${atr.toFixed(2)} (volatilité${type === "crypto" ? ", approximée en clôture-à-clôture faute d'OHLC gratuit" : ""})`,
     news
       ? `Actualités : ton ${news.label} sur ${news.articleCount} articles récents`
       : newsError
@@ -261,13 +561,15 @@ async function runMarketAnalysis(type, query) {
 
   return {
     symbol: query.toUpperCase(),
-    price: price.price,
+    price: currentPrice,
     support,
     resistance,
     verdict,
-    score,
+    score: bull - bear,
     reasoning,
     news,
+    atrStop,
+    atrStopShort,
   };
 }
 
@@ -676,7 +978,10 @@ function Dossier({ setTab, setPrefillCalc }) {
                 dossier.support != null
                   ? {
                       entry: dossier.price,
-                      stop: dossier.verdict === "baissier" ? dossier.resistance : dossier.support,
+                      stop:
+                        dossier.verdict === "baissier"
+                          ? dossier.atrStopShort ?? dossier.resistance
+                          : dossier.atrStop ?? dossier.support,
                     }
                   : { entry: dossier.price }
               );
@@ -848,12 +1153,14 @@ function TopMarkets({ onSendToCalculator }) {
 
             const action = ACTION_MAP[r.verdict] || ACTION_MAP["mitigé"];
             const hasLevels = r.support != null && r.resistance != null;
-            // Prix d'achat = support (zone d'entrée) ; prix de vente =
-            // résistance (zone de sortie). Stop-loss suggéré : 2% sous le
-            // support, en garde-fou si le support est cassé. Pour l'or/argent
-            // (pas d'historique gratuit), on n'envoie que le prix actuel.
+            // Prix d'achat = support (swing low, zone d'entrée) ; prix de
+            // vente = résistance (swing high, zone de sortie). Stop-loss =
+            // support - 1.2×ATR, dimensionné sur la volatilité réelle de
+            // l'actif (repli sur -2% si l'ATR est indisponible). Pour
+            // l'or/argent (pas d'historique gratuit), on n'envoie que le prix actuel.
             const buyPrice = hasLevels ? r.support : r.price;
             const sellPrice = hasLevels ? r.resistance : null;
+            const stopPrice = hasLevels ? r.atrStop ?? buyPrice * 0.98 : null;
 
             return (
               <button
@@ -861,7 +1168,7 @@ function TopMarkets({ onSendToCalculator }) {
                 onClick={() =>
                   onSendToCalculator(
                     hasLevels
-                      ? { entry: buyPrice, stop: buyPrice * 0.98, takeProfit: sellPrice }
+                      ? { entry: buyPrice, stop: stopPrice, takeProfit: sellPrice }
                       : { entry: buyPrice }
                   )
                 }
