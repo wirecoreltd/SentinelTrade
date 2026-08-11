@@ -728,6 +728,54 @@ function calcRiskReward(entry, stop, target) {
   return { risk, reward, ratio: reward / risk };
 }
 
+// Chandelier Exit (Chuck LeBeau) : stop qui "suit" le prix, basé sur le plus
+// haut/plus bas glissant sur `period` bougies, moins/plus un multiple d'ATR.
+// Valeurs standard : période 22, multiplicateur 3. Contrairement au stop
+// structurel (dernier swing figé), il se resserre à chaque nouvelle bougie.
+function calcChandelierExit(history, period = 22, multiplier = 3) {
+  const atrSeries = calcATR(history, period);
+  const n = history.length;
+  const long = new Array(n).fill(null);
+  const short = new Array(n).fill(null);
+  for (let i = 0; i < n; i++) {
+    const atr = atrSeries[i];
+    if (atr == null) continue;
+    const start = Math.max(0, i - period + 1);
+    const windowSlice = history.slice(start, i + 1);
+    const highestHigh = Math.max(...windowSlice.map((h) => h.high));
+    const lowestLow = Math.min(...windowSlice.map((h) => h.low));
+    long[i] = highestHigh - multiplier * atr;
+    short[i] = lowestLow + multiplier * atr;
+  }
+  return { long, short };
+}
+
+// Trailing Stop ATR : le stop suit le prix mais ne peut jamais reculer
+// (ratchet à sens unique). `prevStop` = stop actuel avant recalcul (le stop
+// initial au premier appel). À utiliser dans le Calculateur une fois en
+// position, en resaisissant le prix actuel au fil du temps.
+function calcTrailingStopATR(currentPrice, atr, direction, multiplier = 3, prevStop = null) {
+  if (currentPrice == null || atr == null) return prevStop;
+  const candidate = direction === "haussier" ? currentPrice - multiplier * atr : currentPrice + multiplier * atr;
+  if (prevStop == null) return candidate;
+  return direction === "haussier" ? Math.max(prevStop, candidate) : Math.min(prevStop, candidate);
+}
+
+// Break-even : dès que le trade atteint +1R (gain = distance initialement
+// risquée), on remonte le stop au prix d'entrée (+ buffer optionnel pour
+// couvrir les frais/spread). Ne fait aucune hypothèse sur le futur : ne
+// répond qu'à "est-ce que +1R est déjà atteint MAINTENANT".
+function checkBreakEven(entry, stop, currentPrice, direction, buffer = 0) {
+  if (entry == null || stop == null || currentPrice == null) return { triggered: false, rMultiple: null };
+  const riskDistance = Math.abs(entry - stop);
+  if (riskDistance === 0) return { triggered: false, rMultiple: null };
+  const gained = direction === "haussier" ? currentPrice - entry : entry - currentPrice;
+  const rMultiple = gained / riskDistance;
+  const triggered = rMultiple >= 1;
+  const newStop = direction === "haussier" ? entry + buffer : entry - buffer;
+  return { triggered, rMultiple, newStop: triggered ? newStop : stop };
+}
+
 // DMI / ADX façon Wilder.
 function calcADX(history, period = 14) {
   const n = history.length;
@@ -1134,6 +1182,19 @@ async function runMarketAnalysis(type, query) {
   const atrStop = support != null && atr != null ? support - 1.2 * atr : null;
   const atrStopShort = resistance != null && atr != null ? resistance + 1.2 * atr : null;
 
+  // Chandelier Exit (22, 3) : alternative "suiveuse" au stop structurel,
+  // recalculée sur le plus haut/bas glissant plutôt que sur le dernier swing.
+  const chandelier = calcChandelierExit(history, 22, 3);
+  const chandelierStopLong = chandelier.long[lastIdx];
+  const chandelierStopShort = chandelier.short[lastIdx];
+
+  // Stop recommandé = le plus prudent des deux (le plus éloigné du prix),
+  // pour éviter un stop placé à l'intérieur du bruit normal du marché.
+  const stopCandidatesLong = [atrStop, chandelierStopLong].filter((v) => v != null);
+  const recommendedStopLong = stopCandidatesLong.length ? Math.min(...stopCandidatesLong) : null;
+  const stopCandidatesShort = [atrStopShort, chandelierStopShort].filter((v) => v != null);
+  const recommendedStopShort = stopCandidatesShort.length ? Math.max(...stopCandidatesShort) : null;
+
   // ---- Pass 3 : Entry Algos & Risk/Reward ----
   const zScoreLast = calcZScore(closes, 20)[lastIdx];
   const breakoutRetest = detectBreakoutRetest(history, structure);
@@ -1142,9 +1203,9 @@ async function runMarketAnalysis(type, query) {
 
   const riskReward =
     structure.regime === "haussier"
-      ? calcRiskReward(currentPrice, atrStop, resistance)
+      ? calcRiskReward(currentPrice, recommendedStopLong, resistance)
       : structure.regime === "baissier"
-      ? calcRiskReward(currentPrice, atrStopShort, support)
+      ? calcRiskReward(currentPrice, recommendedStopShort, support)
       : null;
 
   const trendLabel =
@@ -1210,6 +1271,10 @@ async function runMarketAnalysis(type, query) {
       `Risk/Reward : 1:${riskReward.ratio.toFixed(1)} (risque $${riskReward.risk.toFixed(2)} pour un potentiel de $${riskReward.reward.toFixed(2)})`,
     atr != null &&
       `ATR(14) : $${atr.toFixed(2)}${atrAvg != null ? ` (moyenne : $${atrAvg.toFixed(2)})` : ""}${type === "crypto" ? " — approximé en clôture-à-clôture faute d'OHLC gratuit" : ""}`,
+    (chandelierStopLong != null || chandelierStopShort != null) &&
+      `Chandelier Exit(22,3) : long $${chandelierStopLong?.toFixed(2)} / short $${chandelierStopShort?.toFixed(2)}`,
+    (recommendedStopLong != null || recommendedStopShort != null) &&
+      `Stop recommandé (le plus prudent entre ATR et Chandelier) : $${(structure.regime === "baissier" ? recommendedStopShort : recommendedStopLong)?.toFixed(2)}`,
     news
       ? `Actualités : ton ${news.label} sur ${news.articleCount} articles récents`
       : newsError
@@ -1228,6 +1293,10 @@ async function runMarketAnalysis(type, query) {
     news,
     atrStop,
     atrStopShort,
+    chandelierStopLong,
+    chandelierStopShort,
+    recommendedStopLong,
+    recommendedStopShort,
     pivots,
     fibRetracement,
     fibExtension,
@@ -1741,8 +1810,8 @@ function Dossier({ setTab, setPrefillCalc }) {
                       entry: dossier.price,
                       stop:
                         dossier.verdict === "baissier"
-                          ? dossier.atrStopShort ?? dossier.resistance
-                          : dossier.atrStop ?? dossier.support,
+                          ? dossier.recommendedStopShort ?? dossier.atrStopShort ?? dossier.resistance
+                          : dossier.recommendedStopLong ?? dossier.atrStop ?? dossier.support,
                     }
                   : { entry: dossier.price }
               );
@@ -1921,7 +1990,7 @@ function TopMarkets({ onSendToCalculator }) {
             // l'or/argent (pas d'historique gratuit), on n'envoie que le prix actuel.
             const buyPrice = hasLevels ? r.support : r.price;
             const sellPrice = hasLevels ? r.resistance : null;
-            const stopPrice = hasLevels ? r.atrStop ?? buyPrice * 0.98 : null;
+            const stopPrice = hasLevels ? r.recommendedStopLong ?? r.atrStop ?? buyPrice * 0.98 : null;
 
             return (
               <button
@@ -2020,6 +2089,10 @@ function Calculateur({ prefill }) {
   const [entry, setEntry] = useState(prefill?.entry?.toString() || "");
   const [stop, setStop] = useState(prefill?.stop?.toString() || "");
   const [takeProfit, setTakeProfit] = useState(prefill?.takeProfit?.toString() || "");
+  // Suivi de position une fois en trade : prix actuel + ATR (optionnel,
+  // copié depuis le Dossier) pour calculer break-even et trailing stop.
+  const [currentPrice, setCurrentPrice] = useState("");
+  const [liveAtr, setLiveAtr] = useState("");
 
   useEffect(() => {
     if (prefill?.entry) setEntry(prefill.entry.toString());
@@ -2048,6 +2121,13 @@ function Calculateur({ prefill }) {
   const gainAmount = valid && tp > 0 ? quantity * Math.abs(tp - e) : null;
   const gainDistance = valid && tp > 0 ? Math.abs(tp - e) : null;
   const gainDistancePct = valid && tp > 0 ? (gainDistance / e) * 100 : null;
+
+  // Suivi de position : direction déduite du stop (stop < entrée = long).
+  const direction = valid ? (s < e ? "haussier" : "baissier") : null;
+  const cp = parseFloat(currentPrice);
+  const atrVal = parseFloat(liveAtr);
+  const breakEven = valid && cp > 0 ? checkBreakEven(e, s, cp, direction) : null;
+  const trailingAtrStop = valid && cp > 0 && atrVal > 0 ? calcTrailingStopATR(cp, atrVal, direction, 3, s) : null;
 
   return (
     <div>
@@ -2143,6 +2223,45 @@ function Calculateur({ prefill }) {
         </div>
       ) : (
         <div style={{ fontSize: 12, color: MUTED, marginTop: 8 }}>Remplis montant, levier, entrée et stop-loss pour voir le calcul.</div>
+      )}
+
+      {valid && (
+        <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 16, marginTop: 12 }}>
+          <div style={{ fontSize: 12, color: ACCENT, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 10 }}>
+            Gestion de la position (une fois en trade)
+          </div>
+          <CalcField label="Prix actuel" value={currentPrice} onChange={setCurrentPrice} placeholder="ex: 4380.00" />
+          <CalcField label="ATR actuel (optionnel — copie-le depuis le Dossier)" value={liveAtr} onChange={setLiveAtr} placeholder="ex: 45.30" />
+
+          {cp > 0 ? (
+            <div style={{ marginTop: 4 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+                <span style={{ fontSize: 13, color: MUTED }}>Progression</span>
+                <span style={{ fontSize: 14, fontWeight: 700, color: breakEven?.rMultiple >= 0 ? POS : NEG }}>
+                  {breakEven?.rMultiple != null ? `${breakEven.rMultiple.toFixed(2)}R` : "—"}
+                </span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: atrVal > 0 ? 8 : 0 }}>
+                <span style={{ fontSize: 13, color: MUTED }}>Break-even (+1R)</span>
+                <span style={{ fontSize: 13, fontWeight: 700, color: breakEven?.triggered ? POS : MUTED }}>
+                  {breakEven?.triggered ? `Atteint — remonte le stop à ${breakEven.newStop.toFixed(2)}` : "Pas encore atteint"}
+                </span>
+              </div>
+              {atrVal > 0 && (
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <span style={{ fontSize: 13, color: MUTED }}>Trailing stop ATR (×3)</span>
+                  <span style={{ fontSize: 13, fontWeight: 700, color: ACCENT }}>
+                    {trailingAtrStop != null ? trailingAtrStop.toFixed(2) : "—"}
+                  </span>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div style={{ fontSize: 12, color: MUTED }}>
+              Renseigne le prix actuel pour voir ta progression en R et le stop suggéré.
+            </div>
+          )}
+        </div>
       )}
     </div>
   );
