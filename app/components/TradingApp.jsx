@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { calculateSentinelScore } from "../lib/sentinelEngine";
 import {
   FileText,
@@ -155,6 +155,25 @@ async function fetchCoinGeckoMarketsByIds(ids) {
   }).catch(() => []);
 }
 
+// ---------- Vraies bougies OHLC (pour le graphique du Calculateur) ----------
+// CoinGecko expose un endpoint /coins/{id}/ohlc dédié qui renvoie de
+// vraies bougies (open/high/low/close), contrairement à market_chart qui
+// n'a qu'un prix de clôture par jour. Granularité imposée par CoinGecko
+// selon la fenêtre demandée (ex: bougies 30-min sur 1 jour, journalières
+// au-delà de 30 jours) — on ne la choisit pas, on l'affiche telle quelle.
+async function fetchCoinGeckoOHLC(id, days) {
+  const data = await coingeckoProxy(`coins/${id}/ohlc`, {
+    vs_currency: "usd",
+    days: days.toString(),
+  }).catch(() => {
+    throw new Error("Chandelier indisponible pour cette crypto");
+  });
+  if (!Array.isArray(data) || data.length === 0) {
+    throw new Error("Chandelier indisponible pour cette crypto");
+  }
+  return data.map(([ts, open, high, low, close]) => ({ date: ts, open, high, low, close }));
+}
+
 async function fetchAlphaQuote(symbol) {
   return cachedFetch(`quote:${symbol}`, async () => {
     const res = await fetch(`/api/stock?symbol=${encodeURIComponent(symbol)}&kind=quote`);
@@ -185,6 +204,7 @@ async function fetchAlphaHistory(symbol) {
     return Object.entries(series)
       .map(([date, v]) => ({
         date,
+        open: parseFloat(v["1. open"]),
         close: parseFloat(v["4. close"]),
         high: parseFloat(v["2. high"]),
         low: parseFloat(v["3. low"]),
@@ -221,6 +241,7 @@ async function fetchFxHistory(symbol) {
     return Object.entries(series)
       .map(([date, v]) => ({
         date,
+        open: parseFloat(v["1. open"]),
         close: parseFloat(v["4. close"]),
         high: parseFloat(v["2. high"]),
         low: parseFloat(v["3. low"]),
@@ -508,7 +529,7 @@ function detectMarketStructure(history, span = 2) {
   for (let i = span; i < history.length - span; i++) {
     const windowH = highs.slice(i - span, i + span + 1);
     const windowL = lows.slice(i - span, i + span + 1);
-     if (highs[i] === Math.max(...windowH)) swingHighs.push({ price: highs[i] });
+    if (highs[i] === Math.max(...windowH)) swingHighs.push({ price: highs[i] });
     if (lows[i] === Math.min(...windowL)) swingLows.push({ price: lows[i] });
   }
 
@@ -569,7 +590,16 @@ const ATR_FALLBACK_STOP_MULT = 1.5;
 // d'atteindre les fallbacks internes déjà en place plus bas — l'actif
 // restait WAIT sans aucun prix affiché, contrairement à un stop ATR
 // classique qui reste au moins approximatif.
-//const PRICE_PCT_FALLBACK_STOP = 0.03; // 3% du prix courant
+// BUG CORRIGÉ : cette constante était commentée (donc `undefined`) alors
+// qu'elle est utilisée juste en dessous dans computeTradeLevels — dès que
+// `atr` valait `null`, le composant plantait avec une ReferenceError et
+// tout l'onglet (Dossier / Top 15 / Calculateur) s'arrêtait net. Dans les
+// chemins d'appel actuels `atr` n'est jamais `null` à cet endroit (on ne
+// rentre dans cette branche que si `history.length >= 60`, largement
+// suffisant pour l'ATR(14)), mais mieux vaut un filet de sécurité réel
+// qu'une variable fantôme si un futur changement (historique plus court,
+// nouvelle source de données...) réintroduit le cas.
+const PRICE_PCT_FALLBACK_STOP = 0.03; // 3% du prix courant
 const MIN_ATR_PCT_OF_PRICE = 0.008;
 
 function computeTradeLevels({ verdict, currentPrice, support, resistance, atr }) {
@@ -577,7 +607,7 @@ function computeTradeLevels({ verdict, currentPrice, support, resistance, atr })
   // trop plates) : on substitue un pseudo-ATR basé sur 3% du prix courant
   // pour ne jamais renvoyer un résultat totalement vide.
   const rawEffectiveAtr = atr != null ? atr : currentPrice * PRICE_PCT_FALLBACK_STOP;
-   const effectiveAtr = Math.max(rawEffectiveAtr, currentPrice * MIN_ATR_PCT_OF_PRICE);
+  const effectiveAtr = Math.max(rawEffectiveAtr, currentPrice * MIN_ATR_PCT_OF_PRICE);
 
   if (verdict === "haussier") {
     if (support == null) return { stop: null, target: null, riskReward: null, projected: false };
@@ -604,7 +634,7 @@ function computeTradeLevels({ verdict, currentPrice, support, resistance, atr })
     }
     const riskReward = (target - currentPrice) / risk;
     return { stop, target, riskReward, projected };
-  } 
+  }
 
   if (verdict === "baissier") {
     if (resistance == null) return { stop: null, target: null, riskReward: null, projected: false };
@@ -740,7 +770,7 @@ async function runMarketAnalysis(type, query) {
         takeProfit = support;
         riskReward = (price.price - takeProfit) / (atrStopShort - price.price);
       }
-     levelsNote =
+      levelsNote =
         verdict === "mitigé"
           ? "Historique insuffisant pour une analyse technique complète (moins de 60 jours) — actualités neutres, niveaux basés sur le min/max de la période disponible à titre indicatif"
           : "Historique insuffisant pour une analyse technique complète (moins de 60 jours) — niveaux basés sur le min/max de la période disponible, verdict basé sur les actualités";
@@ -774,6 +804,7 @@ async function runMarketAnalysis(type, query) {
 
     return {
       symbol: query.toUpperCase(),
+      rawQuery: query,
       price: price.price,
       change24h,
       support,
@@ -916,7 +947,7 @@ async function runMarketAnalysis(type, query) {
       "Structure de marché indéterminée (pas assez de swing points) — niveaux approximés sur le min/max de la période",
     rsi != null &&
       `RSI(14) : ${rsi.toFixed(0)}${rsi > 75 ? " — suracheté, prudence" : rsi < 25 ? " — survendu, prudence" : ""}`,
-   atr != null &&
+    atr != null &&
       `ATR(14) : $${formatPrice(atr)} (volatilité${type === "crypto" ? ", approximée en clôture-à-clôture faute d'OHLC gratuit" : ""})`,
     atr == null &&
       "ATR indisponible sur cet historique — niveaux d'achat/vente non calculables pour cet actif",
@@ -987,6 +1018,7 @@ async function runMarketAnalysis(type, query) {
 
   return {
     symbol: query.toUpperCase(),
+    rawQuery: query,
     price: currentPrice,
     change24h,
     support,
@@ -1002,6 +1034,269 @@ async function runMarketAnalysis(type, query) {
     riskReward,
     sentinel, // { score, bias, setup, status, breakdown, reasons, warnings }
   };
+}
+
+// ================= Graphique en chandelier (Calculateur) =================
+// Composant SVG autonome (aucune dépendance de charting externe) : dessine
+// de vraies bougies OHLC avec mèches, plus des lignes de niveau (entrée,
+// stop, take-profit, support, résistance) superposées. Le domaine de l'axe Y
+// inclut ces niveaux même s'ils sortent de la fourchette des bougies, pour
+// qu'un stop/target projeté loin du prix reste visible.
+const RANGE_OPTIONS = [
+  { key: "1j", label: "1J" },
+  { key: "5j", label: "5J" },
+  { key: "1m", label: "1M" },
+  { key: "6m", label: "6M" },
+];
+
+function CandleChart({ candles, overlays = [], height = 260 }) {
+  if (!candles || candles.length === 0) return null;
+
+  const width = 640;
+  const padLeft = 6;
+  const padRight = 56; // réserve pour les étiquettes de prix à droite
+  const padTop = 14;
+  const padBottom = 26;
+  const innerW = width - padLeft - padRight;
+  const innerH = height - padTop - padBottom;
+
+  const allHighs = candles.map((c) => c.high);
+  const allLows = candles.map((c) => c.low);
+  const overlayValues = overlays.filter((o) => o.value != null).map((o) => o.value);
+  let domainMax = Math.max(...allHighs, ...overlayValues);
+  let domainMin = Math.min(...allLows, ...overlayValues);
+  if (domainMax === domainMin) {
+    domainMax += Math.abs(domainMax) * 0.01 || 1;
+    domainMin -= Math.abs(domainMin) * 0.01 || 1;
+  }
+  const domainPad = (domainMax - domainMin) * 0.08;
+  domainMax += domainPad;
+  domainMin -= domainPad;
+
+  const yFor = (v) => padTop + innerH - ((v - domainMin) / (domainMax - domainMin)) * innerH;
+
+  const n = candles.length;
+  const slot = innerW / n;
+  const bodyWidth = Math.max(1.5, Math.min(10, slot * 0.6));
+
+  // Étiquettes de dates : 4 repères répartis sur l'axe X, format court.
+  const dateTickIdx = [0, Math.floor((n - 1) / 3), Math.floor((2 * (n - 1)) / 3), n - 1].filter(
+    (v, i, arr) => arr.indexOf(v) === i
+  );
+  const fmtDate = (ts) => {
+    const d = new Date(ts);
+    if (Number.isNaN(d.getTime())) return "";
+    return d.toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit" });
+  };
+
+  // Étiquettes de prix : 4 repères sur l'axe Y.
+  const priceTicks = [0, 1, 2, 3].map((i) => domainMin + ((domainMax - domainMin) * i) / 3);
+
+  return (
+    <svg viewBox={`0 0 ${width} ${height}`} width="100%" height={height} style={{ display: "block" }}>
+      {/* Grille horizontale + étiquettes de prix */}
+      {priceTicks.map((v, i) => (
+        <g key={i}>
+          <line x1={padLeft} x2={width - padRight} y1={yFor(v)} y2={yFor(v)} stroke={LINE} strokeWidth={1} />
+          <text x={width - padRight + 6} y={yFor(v) + 3} fontSize={9} fill={MUTED}>
+            {formatPrice(v)}
+          </text>
+        </g>
+      ))}
+
+      {/* Lignes de niveau (entrée / stop / take-profit / support / résistance) */}
+      {overlays
+        .filter((o) => o.value != null)
+        .map((o, i) => (
+          <g key={`ov-${i}`}>
+            <line
+              x1={padLeft}
+              x2={width - padRight}
+              y1={yFor(o.value)}
+              y2={yFor(o.value)}
+              stroke={o.color}
+              strokeWidth={1.5}
+              strokeDasharray={o.dashed === false ? undefined : "5,4"}
+            />
+            <text x={padLeft + 2} y={yFor(o.value) - 4} fontSize={9} fontWeight={700} fill={o.color}>
+              {o.label} {formatPrice(o.value)}
+            </text>
+          </g>
+        ))}
+
+      {/* Bougies */}
+      {candles.map((c, i) => {
+        const x = padLeft + i * slot + slot / 2;
+        const up = c.close >= c.open;
+        const color = up ? POS : NEG;
+        const bodyTop = yFor(Math.max(c.open, c.close));
+        const bodyBottom = yFor(Math.min(c.open, c.close));
+        const bodyH = Math.max(1, bodyBottom - bodyTop);
+        return (
+          <g key={i}>
+            <line x1={x} x2={x} y1={yFor(c.high)} y2={yFor(c.low)} stroke={color} strokeWidth={1} />
+            <rect
+              x={x - bodyWidth / 2}
+              y={bodyTop}
+              width={bodyWidth}
+              height={bodyH}
+              fill={color}
+              opacity={0.95}
+            />
+          </g>
+        );
+      })}
+
+      {/* Étiquettes de dates */}
+      {dateTickIdx.map((idx) => {
+        const x = padLeft + idx * slot + slot / 2;
+        return (
+          <text key={idx} x={x} y={height - 8} fontSize={9} fill={MUTED} textAnchor="middle">
+            {fmtDate(candles[idx].date)}
+          </text>
+        );
+      })}
+    </svg>
+  );
+}
+
+// Nombre de jours CoinGecko à demander pour chaque plage. CoinGecko impose
+// sa propre granularité de bougie selon la fenêtre (ex: pas de 30 min sur 1
+// jour, pas journalier au-delà de 30 jours) — on ne la choisit pas.
+// "5J" utilise 7 jours : c'est la plage la plus proche que CoinGecko
+// supporte réellement (pas de valeur "5" acceptée par l'endpoint /ohlc).
+const CRYPTO_DAYS_BY_RANGE = { "1j": 1, "5j": 7, "1m": 30, "6m": 180 };
+// Nombre de bougies journalières à garder pour actions/devises, où seul
+// l'historique quotidien (Alpha Vantage) est disponible gratuitement — pas
+// d'intraday. "1J" retombe donc sur la dernière bougie journalière connue.
+const DAILY_BARS_BY_RANGE = { "1j": 2, "5j": 5, "1m": 22, "6m": 130 };
+
+// Récupère les bougies pour le graphique du Calculateur, selon le type
+// d'actif et la plage sélectionnée. Renvoie toujours { candles, note } :
+// `note` porte un avertissement à afficher (ex: pas d'intraday, pas
+// d'historique pour les métaux) sans bloquer l'affichage du reste.
+async function fetchCalculatorCandles({ assetType, rawQuery, rangeKey }) {
+  if (!rawQuery) throw new Error("Actif inconnu");
+
+  if (assetType === "crypto") {
+    const days = CRYPTO_DAYS_BY_RANGE[rangeKey];
+    const candles = await fetchCoinGeckoOHLC(rawQuery.toLowerCase(), days);
+    return { candles, note: null };
+  }
+
+  if (assetType === "matieres") {
+    // Or / argent : gold-api.com ne fournit pas d'historique gratuit (voir
+    // fetchMetalPrice plus haut) — impossible d'afficher un chandelier.
+    throw new Error("Historique indisponible gratuitement pour l'or/l'argent — seul le prix en temps réel est affiché ailleurs dans l'appli.");
+  }
+
+  if (assetType === "forex") {
+    const full = await fetchFxHistory(rawQuery.toUpperCase());
+    const bars = DAILY_BARS_BY_RANGE[rangeKey];
+    const candles = full.slice(-bars);
+    const note = rangeKey === "1j" ? "Pas d'historique intraday disponible (plan Alpha Vantage gratuit) — dernières bougies journalières affichées." : null;
+    return { candles, note };
+  }
+
+  // actions
+  const full = await fetchAlphaHistory(rawQuery.toUpperCase());
+  const bars = DAILY_BARS_BY_RANGE[rangeKey];
+  const candles = full.slice(-bars);
+  const note = rangeKey === "1j" ? "Pas d'historique intraday disponible (plan Alpha Vantage gratuit) — dernières bougies journalières affichées." : null;
+  return { candles, note };
+}
+
+function TradeChart({ assetType, rawQuery, symbol, entry, stop, takeProfit, support, resistance }) {
+  const [range, setRange] = useState("1m");
+  const [state, setState] = useState({ loading: true, error: "", candles: [], note: null });
+  const cacheRef = useRef(new Map());
+
+  useEffect(() => {
+    if (!rawQuery || !assetType) return;
+    const cacheKey = `${assetType}:${rawQuery}:${range}`;
+    const cached = cacheRef.current.get(cacheKey);
+    if (cached) {
+      setState({ loading: false, error: "", candles: cached.candles, note: cached.note });
+      return;
+    }
+    let cancelled = false;
+    setState((s) => ({ ...s, loading: true, error: "" }));
+    fetchCalculatorCandles({ assetType, rawQuery, rangeKey: range })
+      .then(({ candles, note }) => {
+        if (cancelled) return;
+        cacheRef.current.set(cacheKey, { candles, note });
+        setState({ loading: false, error: "", candles, note });
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setState({ loading: false, error: e.message, candles: [], note: null });
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [assetType, rawQuery, range]);
+
+  if (!rawQuery || !assetType) {
+    return (
+      <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 16, marginBottom: 16, fontSize: 12, color: MUTED, textAlign: "center" }}>
+        Envoie un actif depuis le Dossier ou le Top 15 pour afficher son graphique en chandelier ici.
+      </div>
+    );
+  }
+
+  const overlays = [
+    entry != null && { value: entry, color: ACCENT, label: "Entrée", dashed: true },
+    stop != null && { value: stop, color: NEG, label: "Stop", dashed: true },
+    takeProfit != null && { value: takeProfit, color: POS, label: "TP", dashed: true },
+    support != null && { value: support, color: MUTED, label: "Support", dashed: true },
+    resistance != null && { value: resistance, color: MUTED, label: "Résist.", dashed: true },
+  ].filter(Boolean);
+
+  return (
+    <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 14, marginBottom: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+        <div style={{ fontSize: 13, fontWeight: 700 }}>{symbol}</div>
+        <div style={{ display: "flex", gap: 4 }}>
+          {RANGE_OPTIONS.map((r) => (
+            <button
+              key={r.key}
+              onClick={() => setRange(r.key)}
+              style={{
+                padding: "4px 10px",
+                borderRadius: 6,
+                border: `1px solid ${range === r.key ? ACCENT : LINE}`,
+                background: range === r.key ? "rgba(79,140,255,0.12)" : "transparent",
+                color: range === r.key ? ACCENT : MUTED,
+                fontSize: 11,
+                fontWeight: 700,
+                cursor: "pointer",
+              }}
+            >
+              {r.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {state.loading && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "40px 0", justifyContent: "center", color: MUTED, fontSize: 12 }}>
+          <Loader2 className="spin" size={14} color={ACCENT} /> Chargement du graphique…
+        </div>
+      )}
+
+      {!state.loading && state.error && (
+        <div style={{ fontSize: 12, color: NEG, padding: "20px 0", textAlign: "center" }}>{state.error}</div>
+      )}
+
+      {!state.loading && !state.error && state.candles.length > 0 && (
+        <>
+          <CandleChart candles={state.candles} overlays={overlays} />
+          {state.note && <div style={{ fontSize: 10, color: MUTED, marginTop: 6 }}>ℹ️ {state.note}</div>}
+        </>
+      )}
+    </div>
+  );
 }
 
 // ================= Dossier d'analyse =================
@@ -1159,9 +1454,12 @@ function Dossier({ setTab, setPrefillCalc }) {
                 entry: dossier.price,
                 stop: dossier.levelsDirection === "baissier" ? dossier.atrStopShort : dossier.atrStop,
                 takeProfit: dossier.takeProfit,
+                support: dossier.support,
+                resistance: dossier.resistance,
                 assetType: type === "crypto" ? "crypto" : type === "fx" && isMetal(query) ? "matieres" : type === "fx" ? "forex" : "actions",
                 direction: dossier.levelsDirection === "baissier" ? "short" : "long",
                 symbol: dossier.symbol,
+                rawQuery: dossier.rawQuery,
                 verdict: dossier.verdict,
               });
               setTab("calc");
@@ -1403,9 +1701,12 @@ function TopMarkets({ onSendToCalculator }) {
                     entry: buyPrice,
                     stop: stopPrice,
                     takeProfit: sellPrice,
+                    support: r.support,
+                    resistance: r.resistance,
                     assetType: r.type === "crypto" ? "crypto" : r.type === "fx" && isMetal(r.query) ? "matieres" : r.type === "fx" ? "forex" : "actions",
                     direction: isBearishLevels ? "short" : "long",
                     symbol: r.symbol || r.query.toUpperCase(),
+                    rawQuery: r.rawQuery || r.query,
                     verdict: r.verdict,
                   })
                 }
@@ -1612,6 +1913,17 @@ function Calculateur({ prefill }) {
         <button onClick={() => setMode("auto")} style={{ flex: 1, padding: "9px 10px", borderRadius: 8, border: `1px solid ${mode === "auto" ? AMBER : LINE}`, background: mode === "auto" ? "rgba(252,211,77,0.12)" : "transparent", color: mode === "auto" ? AMBER : MUTED, fontWeight: 700, fontSize: 13, cursor: "pointer" }}>⚡ Automatique — Signal</button>
         <button onClick={() => setMode("manual")} style={{ flex: 1, padding: "9px 10px", borderRadius: 8, border: `1px solid ${mode === "manual" ? AMBER : LINE}`, background: mode === "manual" ? "rgba(252,211,77,0.12)" : "transparent", color: mode === "manual" ? AMBER : MUTED, fontWeight: 700, fontSize: 13, cursor: "pointer" }}>✎ Manuel</button>
       </div>
+
+      <TradeChart
+        assetType={prefill?.assetType}
+        rawQuery={prefill?.rawQuery}
+        symbol={prefill?.symbol}
+        entry={prefill?.entry}
+        stop={prefill?.stop}
+        takeProfit={prefill?.takeProfit}
+        support={prefill?.support}
+        resistance={prefill?.resistance}
+      />
 
       {prefill?.symbol && (
         <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: 12, marginBottom: 14 }}>
