@@ -57,6 +57,37 @@ function throttledNewsCall(fn) {
   return run;
 }
 
+// ---------- Cache news persistant (localStorage) ----------
+// Le plan gratuit NewsData.io autorise seulement 30 requêtes / 15 minutes
+// (pas juste 200/jour). Un cache en mémoire JS (comme apiCache plus haut)
+// est vidé à chaque rechargement de page — donc 2-3 refresh en quelques
+// minutes suffisent à dépasser la limite. On persiste donc les résultats
+// news dans localStorage pour qu'ils survivent aux rechargements.
+const NEWS_CACHE_TTL_MS = 20 * 60 * 1000; // 20 minutes
+const NEWS_CACHE_PREFIX = "trading-app:news-cache:";
+
+function readNewsCache(query) {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(NEWS_CACHE_PREFIX + query);
+    if (!raw) return null;
+    const { data, ts } = JSON.parse(raw);
+    if (Date.now() - ts > NEWS_CACHE_TTL_MS) return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+function writeNewsCache(query, data) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(NEWS_CACHE_PREFIX + query, JSON.stringify({ data, ts: Date.now() }));
+  } catch {
+    // localStorage plein/indisponible : on continue sans cache persistant
+  }
+}
+
 const METAL_SYMBOLS = ["XAU", "XAG"];
 function isMetal(symbol) {
   return METAL_SYMBOLS.includes(symbol.toUpperCase());
@@ -210,10 +241,15 @@ async function fetchFxHistory(symbol) {
   });
 }
 
-// Résultats mis en cache 15 min + appels espacés d'au moins 600ms entre eux
-// pour ne pas déclencher le rate-limit de NewsData.io quand plusieurs actifs
-// sont analysés en même temps (ex: scan Top 15).
+// Cache persistant (localStorage, 20 min) vérifié EN PREMIER — donc un
+// rechargement de page ne redéclenche pas d'appel réseau pour un actif déjà
+// interrogé récemment. Si rien en cache, appel réel via la file throttlée
+// (600ms d'écart mini) pour ne pas taper le rate-limit NewsData.io quand
+// plusieurs actifs sont analysés en même temps (ex: scan Top 15).
 async function fetchNewsSentiment(query) {
+  const persisted = readNewsCache(query);
+  if (persisted) return persisted;
+
   return cachedFetch(`news:${query}`, () =>
     throttledNewsCall(async () => {
       const res = await fetch(`/api/news?q=${encodeURIComponent(query)}`);
@@ -235,7 +271,9 @@ async function fetchNewsSentiment(query) {
       if (score >= 2) label = "positif";
       else if (score <= -2) label = "négatif";
 
-      return { label, score, articleCount: articles.length, headlines: articles.slice(0, 3).map((a) => a.title) };
+      const result = { label, score, articleCount: articles.length, headlines: articles.slice(0, 3).map((a) => a.title) };
+      writeNewsCache(query, result);
+      return result;
     })
   );
 }
