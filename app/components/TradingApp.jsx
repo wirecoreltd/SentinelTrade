@@ -1495,7 +1495,6 @@ async function runLongTermAnalysis(item) {
     const rsiScore = rsi == null ? 0 : rsi >= 45 && rsi <= 68 ? 1 : rsi > 75 ? -1 : rsi < 30 ? -0.5 : 0;
     const momentumScore = clampNumber(momentum / (horizon.days === 30 ? 12 : horizon.days === 90 ? 25 : 40), -1.5, 1.5);
     const score = momentumScore * 0.55 + trendScore * 0.30 + rsiScore * 0.15;
-    const label = score >= 0.65 ? "FAVORI" : score >= 0.15 ? "SURVEILLER" : "ATTENDRE";
 
     // TP/SL sont propres à l'horizon : ils ne sont jamais réutilisés d'un autre horizon.
     const technicalResistance = range.high != null && range.high > current
@@ -1512,8 +1511,30 @@ async function runLongTermAnalysis(item) {
     const rewardPct = Math.max(0, ((target - current) / current) * 100);
     const riskReward = riskPct > 0 ? rewardPct / riskPct : null;
 
+    // Le R:R est un filtre obligatoire du classement long terme.
+    // Un excellent momentum ne suffit pas à rendre un setup intéressant
+    // si l'objectif est trop proche par rapport au risque pris.
+    let label;
+    if (riskReward == null || riskReward < 1.0) {
+      label = "ATTENDRE";
+    } else if (score >= 0.65 && riskReward >= 1.5) {
+      label = "FAVORI";
+    } else if (score >= 0.15 && riskReward >= 1.2) {
+      label = "SURVEILLER";
+    } else {
+      label = "ATTENDRE";
+    }
+
+    // Score de classement : le score directionnel reste la base, mais un
+    // mauvais R:R doit empêcher un actif d'arriver artificiellement en tête.
+    const rankingScore =
+      riskReward == null ? -2 :
+      riskReward < 1 ? score - 1.0 :
+      score + Math.min(riskReward, 3) * 0.05;
+
     horizonData[horizon.key] = {
       score,
+      rankingScore,
       label,
       returnPct: momentum,
       support: technicalSupport,
@@ -1530,7 +1551,7 @@ async function runLongTermAnalysis(item) {
     };
   }
 
-  const score = Object.values(horizonData).reduce((sum, h) => sum + h.score, 0) / 3;
+  const score = Object.values(horizonData).reduce((sum, h) => sum + h.rankingScore, 0) / 3;
   return {
     ...item,
     price: current,
@@ -1555,7 +1576,7 @@ function LongTermInvestissement({ onSendToCalculator }) {
     setError("");
     if (cacheRef.current) {
       const cached = cacheRef.current;
-      const ok = cached.filter((r) => !r.error).sort((a, b) => b.horizons[horizon].score - a.horizons[horizon].score);
+      const ok = cached.filter((r) => !r.error).sort((a, b) => b.horizons[horizon].rankingScore - a.horizons[horizon].rankingScore);
       const failed = cached.filter((r) => r.error);
       setResults([...ok, ...failed]);
       return;
@@ -1574,7 +1595,7 @@ function LongTermInvestissement({ onSendToCalculator }) {
       setProgress((p) => ({ ...p, done: p.done + 1 }));
     }
     cacheRef.current = settled;
-    const ok = settled.filter((r) => !r.error).sort((a, b) => b.horizons[horizon].score - a.horizons[horizon].score);
+    const ok = settled.filter((r) => !r.error).sort((a, b) => b.horizons[horizon].rankingScore - a.horizons[horizon].rankingScore);
     const failed = settled.filter((r) => r.error);
     setResults([...ok, ...failed]);
     if (!ok.length) setError("Impossible d'obtenir les données long terme pour le moment.");
@@ -1591,8 +1612,10 @@ function LongTermInvestissement({ onSendToCalculator }) {
     <div>
       <div style={{ marginBottom: 14 }}>
         <div style={{ fontSize: 13, color: MUTED, lineHeight: 1.55 }}>
-          Sélection long terme de 5 marchés crypto. Le classement utilise le momentum de la période,
-          la tendance EMA20/EMA50 et le RSI. Les niveaux affichés sont des repères techniques, pas une garantie de rendement.
+          Sélection long terme de 5 marchés crypto. Le classement combine le momentum de la période,
+          la tendance EMA, le RSI et la qualité du setup risque/rendement. Un actif ne peut être FAVORI
+          que si son R:R est suffisamment favorable. Les niveaux affichés sont des repères techniques,
+          pas une garantie de rendement.
         </div>
       </div>
 
@@ -1668,6 +1691,12 @@ function LongTermInvestissement({ onSendToCalculator }) {
                 <div style={{ background: NAVY, borderRadius: 8, padding: 8 }}><div style={{ fontSize: 10, color: MUTED }}>Stop {selectedHorizon.label}</div><div style={{ fontSize: 13, fontWeight: 800, color: NEG }}>${formatPrice(h.stop)} <span style={{fontSize:10}}>({h.riskPct.toFixed(1)}%)</span></div></div>
                 <div style={{ background: NAVY, borderRadius: 8, padding: 8 }}><div style={{ fontSize: 10, color: MUTED }}>Levier / R:R</div><div style={{ fontSize: 12, fontWeight: 800 }}>x{h.leverage} · {h.riskReward != null ? h.riskReward.toFixed(2) : "—"}:1</div></div>
               </div>
+
+              {h.riskReward != null && h.riskReward < 1 && (
+                <div style={{ marginTop: 8, padding: "8px 10px", borderRadius: 8, background: "rgba(255,103,103,0.08)", border: `1px solid ${NEG}`, color: NEG, fontSize: 11, lineHeight: 1.4 }}>
+                  ⚠️ R:R insuffisant ({h.riskReward.toFixed(2)}:1) : l'objectif est trop proche par rapport au risque. Le setup reste en ATTENDRE même si la tendance est favorable.
+                </div>
+              )}
 
               <button
                 onClick={() => onSendToCalculator({
