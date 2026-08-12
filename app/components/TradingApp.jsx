@@ -942,83 +942,86 @@ function CandleChart({ candles, overlays = [], height = 260 }) {
   if (!candles || candles.length === 0) return null;
 
   const width = 640;
-  const padLeft = 6;
-  const padRight = 56;
-  const padTop = 14;
-  const padBottom = 26;
+  const padLeft = 8;
+  const padRight = 62;
+  const padTop = 18;
+  const padBottom = 28;
   const innerW = width - padLeft - padRight;
   const innerH = height - padTop - padBottom;
 
-  const allHighs = candles.map((c) => c.high);
-  const allLows = candles.map((c) => c.low);
-  const overlayValues = overlays.filter((o) => o.value != null).map((o) => o.value);
-  let domainMax = Math.max(...allHighs, ...overlayValues);
-  let domainMin = Math.min(...allLows, ...overlayValues);
-  if (domainMax === domainMin) {
-    domainMax += Math.abs(domainMax) * 0.01 || 1;
-    domainMin -= Math.abs(domainMin) * 0.01 || 1;
-  }
-  const domainPad = (domainMax - domainMin) * 0.08;
-  domainMax += domainPad;
-  domainMin -= domainPad;
+  // IMPORTANT: the price scale is based primarily on the candles.
+  // Entry/SL/TP/support/resistance must not make the candles tiny when one
+  // level is far away from the current market range.
+  const candleHigh = Math.max(...candles.map((c) => Number(c.high)));
+  const candleLow = Math.min(...candles.map((c) => Number(c.low)));
+  const candleRange = Math.max(candleHigh - candleLow, candleHigh * 0.001, 0.00000001);
+  const candlePad = candleRange * 0.12;
 
-  const yFor = (v) => padTop + innerH - ((v - domainMin) / (domainMax - domainMin)) * innerH;
+  let domainMin = candleLow - candlePad;
+  let domainMax = candleHigh + candlePad;
+
+  // Include trade levels only when they are reasonably close to the visible
+  // candle range. This keeps the chart readable while still showing useful
+  // trading levels. Far-away levels are clamped to the chart edge.
+  const overlayLimit = candleRange * 1.8;
+  const visibleOverlays = overlays
+    .filter((o) => o.value != null && Number.isFinite(Number(o.value)))
+    .map((o) => ({ ...o, value: Number(o.value) }))
+    .filter((o) => o.value >= candleLow - overlayLimit && o.value <= candleHigh + overlayLimit);
+
+  for (const o of visibleOverlays) {
+    domainMin = Math.min(domainMin, o.value);
+    domainMax = Math.max(domainMax, o.value);
+  }
+
+  const finalRange = Math.max(domainMax - domainMin, candleRange * 0.25);
+  const yFor = (v) => padTop + innerH - ((v - domainMin) / finalRange) * innerH;
+  const clampY = (v) => Math.max(padTop + 2, Math.min(padTop + innerH - 2, yFor(v)));
 
   const n = candles.length;
-  const slot = innerW / n;
-  const bodyWidth = Math.max(1.5, Math.min(10, slot * 0.6));
+  const slot = innerW / Math.max(n, 1);
+  // Keep candles readable at every timeframe. Never let bodies become huge.
+  const bodyWidth = Math.max(2, Math.min(9, slot * 0.58));
 
   const dateTickIdx = [0, Math.floor((n - 1) / 3), Math.floor((2 * (n - 1)) / 3), n - 1].filter(
     (v, i, arr) => arr.indexOf(v) === i
   );
+
   const fmtDate = (ts) => {
     const d = new Date(ts);
     if (Number.isNaN(d.getTime())) return "";
+    if (n <= 40) {
+      return d.toLocaleString("fr-FR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+    }
     return d.toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit" });
   };
 
-  const priceTicks = [0, 1, 2, 3].map((i) => domainMin + ((domainMax - domainMin) * i) / 3);
+  // Five horizontal levels with a clean, evenly spaced price scale.
+  const priceTicks = [0, 0.25, 0.5, 0.75, 1].map((ratio) => domainMin + finalRange * ratio);
 
   return (
     <svg viewBox={`0 0 ${width} ${height}`} width="100%" height={height} style={{ display: "block" }}>
+      {/* Price grid */}
       {priceTicks.map((v, i) => (
-        <g key={i}>
-          <line x1={padLeft} x2={width - padRight} y1={yFor(v)} y2={yFor(v)} stroke={LINE} strokeWidth={1} />
-          <text x={width - padRight + 6} y={yFor(v) + 3} fontSize={9} fill={MUTED}>
+        <g key={`tick-${i}`}>
+          <line x1={padLeft} x2={width - padRight} y1={yFor(v)} y2={yFor(v)} stroke={LINE} strokeWidth={1} opacity={0.65} />
+          <text x={width - padRight + 7} y={yFor(v) + 3} fontSize={9} fill={MUTED}>
             {formatPrice(v)}
           </text>
         </g>
       ))}
 
-      {overlays
-        .filter((o) => o.value != null)
-        .map((o, i) => (
-          <g key={`ov-${i}`}>
-            <line
-              x1={padLeft}
-              x2={width - padRight}
-              y1={yFor(o.value)}
-              y2={yFor(o.value)}
-              stroke={o.color}
-              strokeWidth={1.5}
-              strokeDasharray={o.dashed === false ? undefined : "5,4"}
-            />
-            <text x={padLeft + 2} y={yFor(o.value) - 4} fontSize={9} fontWeight={700} fill={o.color}>
-              {o.label} {formatPrice(o.value)}
-            </text>
-          </g>
-        ))}
-
+      {/* Candles first, so trade levels stay visually on top */}
       {candles.map((c, i) => {
         const x = padLeft + i * slot + slot / 2;
         const up = c.close >= c.open;
         const color = up ? ACCENT : NEG;
         const bodyTop = yFor(Math.max(c.open, c.close));
         const bodyBottom = yFor(Math.min(c.open, c.close));
-        const bodyH = Math.max(1, bodyBottom - bodyTop);
+        const bodyH = Math.max(1.5, bodyBottom - bodyTop);
         return (
-          <g key={i}>
-            <line x1={x} x2={x} y1={yFor(c.high)} y2={yFor(c.low)} stroke={color} strokeWidth={1} />
+          <g key={`candle-${i}`}>
+            <line x1={x} x2={x} y1={yFor(c.high)} y2={yFor(c.low)} stroke={color} strokeWidth={1.2} />
             <rect
               x={x - bodyWidth / 2}
               y={bodyTop}
@@ -1026,15 +1029,47 @@ function CandleChart({ candles, overlays = [], height = 260 }) {
               height={bodyH}
               fill={color}
               opacity={0.95}
+              rx={0.6}
             />
           </g>
         );
       })}
 
+      {/* Trade levels. If a level is outside the focused scale, show it at
+          the nearest edge with an arrow-like label instead of shrinking the chart. */}
+      {overlays
+        .filter((o) => o.value != null && Number.isFinite(Number(o.value)))
+        .map((o, i) => {
+          const raw = Number(o.value);
+          const outsideTop = raw > domainMax;
+          const outsideBottom = raw < domainMin;
+          const y = clampY(raw);
+          const suffix = outsideTop ? " ↑" : outsideBottom ? " ↓" : "";
+          return (
+            <g key={`ov-${i}`}>
+              <line
+                x1={padLeft}
+                x2={width - padRight}
+                y1={y}
+                y2={y}
+                stroke={o.color}
+                strokeWidth={1.5}
+                strokeDasharray={o.dashed === false ? undefined : "5,4"}
+                opacity={0.9}
+              />
+              <rect x={padLeft + 2} y={y - 13} width={Math.min(118, 62 + String(o.label || "").length * 5)} height={14} rx={3} fill={PANEL} opacity={0.92} />
+              <text x={padLeft + 5} y={y - 3} fontSize={9} fontWeight={700} fill={o.color}>
+                {o.label} {formatPrice(raw)}{suffix}
+              </text>
+            </g>
+          );
+        })}
+
+      {/* Time axis */}
       {dateTickIdx.map((idx) => {
         const x = padLeft + idx * slot + slot / 2;
         return (
-          <text key={idx} x={x} y={height - 8} fontSize={9} fill={MUTED} textAnchor="middle">
+          <text key={`date-${idx}`} x={x} y={height - 8} fontSize={8.5} fill={MUTED} textAnchor="middle">
             {fmtDate(candles[idx].date)}
           </text>
         );
@@ -1051,7 +1086,15 @@ async function fetchCalculatorCandles({ assetType, rawQuery, rangeKey }) {
 
   if (assetType === "crypto") {
     const days = CRYPTO_DAYS_BY_RANGE[rangeKey];
-    const candles = await fetchCoinGeckoOHLC(rawQuery.toLowerCase(), days);
+    let candles = await fetchCoinGeckoOHLC(rawQuery.toLowerCase(), days);
+
+    // CoinGecko does not provide a native 5-day OHLC window. We request 7 days
+    // and keep only the latest 5 days so the UI label and data match.
+    if (rangeKey === "5j" && candles.length > 0) {
+      const cutoff = Date.now() - 5 * 24 * 60 * 60 * 1000;
+      candles = candles.filter((c) => c.date >= cutoff);
+    }
+
     return { candles, note: null };
   }
 
