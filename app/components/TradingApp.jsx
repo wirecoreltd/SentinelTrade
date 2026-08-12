@@ -1080,6 +1080,84 @@ function CandleChart({ candles, overlays = [], height = 260 }) {
   );
 }
 
+// ─── Prix crypto en temps réel via Binance WebSocket (gratuit, sans clé API) ───
+const BINANCE_SYMBOL_MAP = {
+  bitcoin: "btcusdt",
+  ethereum: "ethusdt",
+  solana: "solusdt",
+  binancecoin: "bnbusdt",
+  ripple: "xrpusdt",
+  cardano: "adausdt",
+  dogecoin: "dogeusdt",
+  "avalanche-2": "avaxusdt",
+};
+
+// ids : tableau d'ids CoinGecko (ex: ["bitcoin", "ethereum"]).
+// Retourne { [id]: dernierPrix } mis à jour à chaque trade Binance.
+function useBinanceLivePrices(ids) {
+  const [prices, setPrices] = useState({});
+  const idsKey = [...new Set(ids.filter((id) => BINANCE_SYMBOL_MAP[id]))].sort().join(",");
+
+  useEffect(() => {
+    const activeIds = idsKey ? idsKey.split(",") : [];
+    if (activeIds.length === 0) return;
+
+    const streams = activeIds.map((id) => `${BINANCE_SYMBOL_MAP[id]}@trade`).join("/");
+    let ws;
+    let reconnectTimer;
+    let cancelled = false;
+
+    const connect = () => {
+      ws = new WebSocket(`wss://stream.binance.com:9443/stream?streams=${streams}`);
+
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          const symbol = msg?.data?.s?.toLowerCase();
+          const price = parseFloat(msg?.data?.p);
+          if (!symbol || !Number.isFinite(price)) return;
+          const id = Object.keys(BINANCE_SYMBOL_MAP).find((k) => BINANCE_SYMBOL_MAP[k] === symbol);
+          if (!id) return;
+          setPrices((prev) => (prev[id] === price ? prev : { ...prev, [id]: price }));
+        } catch {
+          // trame malformée, on ignore
+        }
+      };
+
+      ws.onclose = () => {
+        if (cancelled) return;
+        reconnectTimer = setTimeout(connect, 3000);
+      };
+
+      ws.onerror = () => {
+        ws.close();
+      };
+    };
+
+    connect();
+
+    return () => {
+      cancelled = true;
+      clearTimeout(reconnectTimer);
+      if (ws) {
+        ws.onclose = null;
+        ws.close();
+      }
+    };
+  }, [idsKey]);
+
+  return prices;
+}
+
+function LiveBadge() {
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 3, fontSize: 9, color: POS, fontWeight: 700 }}>
+      <span style={{ width: 5, height: 5, borderRadius: "50%", background: POS, display: "inline-block" }} />
+      LIVE
+    </span>
+  );
+}
+
 const CRYPTO_DAYS_BY_RANGE = { "1j": 1, "5j": 7, "1m": 30, "6m": 180 };
 const DAILY_BARS_BY_RANGE = { "1j": 2, "5j": 5, "1m": 22, "6m": 130 };
 
@@ -1220,6 +1298,17 @@ function Dossier({ setTab, setPrefillCalc }) {
   const [error, setError] = useState("");
   const [dossier, setDossier] = useState(null);
 
+  const dossierLiveId =
+    dossier?.rawQuery && BINANCE_SYMBOL_MAP[dossier.rawQuery.toLowerCase()]
+      ? dossier.rawQuery.toLowerCase()
+      : null;
+  const dossierLivePrices = useBinanceLivePrices(dossierLiveId ? [dossierLiveId] : []);
+  const dossierDisplayPrice =
+    dossierLiveId && dossierLivePrices[dossierLiveId] != null
+      ? dossierLivePrices[dossierLiveId]
+      : dossier?.price;
+  const dossierIsLive = dossierLiveId && dossierLivePrices[dossierLiveId] != null;
+
   const analyser = async () => {
     if (!query) return;
     setLoading(true);
@@ -1292,8 +1381,15 @@ function Dossier({ setTab, setPrefillCalc }) {
 
       {dossier && (
         <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 16 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
             <div style={{ fontSize: 15, fontWeight: 700 }}>{dossier.symbol}</div>
+            {dossierIsLive && <LiveBadge />}
+          </div>
+          <div style={{ fontSize: 13, color: MUTED, marginBottom: 10 }}>
+            ${formatPrice(dossierDisplayPrice)}
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+            <div />
             <div
               style={{
                 fontSize: 13,
@@ -1848,6 +1944,8 @@ function TopMarkets({ onSendToCalculator, onGoToHistorique }) {
   const [results, setResults] = useState([]);
   const [error, setError] = useState("");
   const [openTrades, setOpenTrades] = useState([]);
+  const cryptoIds = WATCHLIST.filter((w) => w.type === "crypto").map((w) => w.query);
+  const livePrices = useBinanceLivePrices(cryptoIds);
 
   useEffect(() => {
     setOpenTrades(getOpenTrades(loadHistory()));
@@ -1975,6 +2073,8 @@ function TopMarkets({ onSendToCalculator, onGoToHistorique }) {
 
             const resultSymbol = r.symbol || r.query.toUpperCase();
             const resultAssetType = assetTypeForResult(r);
+          const isLive = r.type === "crypto" && livePrices[r.query] != null;
+            const displayPrice = isLive ? livePrices[r.query] : r.price;
             const matchedTrade = openTrades.find(
               (t) => t.symbol === resultSymbol && t.assetType === resultAssetType
             );
@@ -1983,7 +2083,7 @@ function TopMarkets({ onSendToCalculator, onGoToHistorique }) {
             const action = guidance ? POSITION_BADGE[guidance.key] : ACTION_MAP[r.verdict] || ACTION_MAP["mitigé"];
 
             const isBearishLevels = r.levelsDirection === "baissier";
-            const buyPrice = r.price;
+            const buyPrice = displayPrice;
             const sellPrice = r.takeProfit;
             const stopPrice = isBearishLevels ? r.atrStopShort : r.atrStop;
             const hasLevels = !guidance && sellPrice != null && stopPrice != null;
