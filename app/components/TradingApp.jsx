@@ -536,31 +536,59 @@ async function runMarketAnalysis(type, query) {
 
   // Pas assez d'historique (or/argent, ou série trop courte) pour une
   // analyse technique fiable : verdict basé uniquement sur les actualités.
-  if (!history || history.length < 60) {
+ if (!history || history.length < 60) {
     let verdict = "mitigé";
     if (news?.label === "positif") verdict = "haussier";
     else if (news?.label === "négatif") verdict = "baissier";
+
+    // Pas assez (ou pas du tout) d'historique pour un vrai calcul
+    // technique. On dérive quand même des niveaux exploitables pour que
+    // l'auto-remplissage (Top 15 + Calculateur) fonctionne partout :
+    // - or/argent : bande à ±1.5% du prix courant (heuristique, pas un
+    //   vrai support/résistance)
+    // - historique court mais présent : min/max de la période disponible
+    let support = null, resistance = null, atrStop = null, atrStopShort = null;
+    let levelsNote;
+
+    if (metal) {
+      const pct = 0.015;
+      support = price.price * (1 - pct);
+      resistance = price.price * (1 + pct);
+      atrStop = support * 0.995;
+      atrStopShort = resistance * 1.005;
+      levelsNote = "Historique de prix indisponible gratuitement pour l'or/l'argent — niveaux approximés à ±1,5% du prix courant (pas un calcul technique réel), verdict basé sur les actualités";
+    } else if (history && history.length >= 2) {
+      const sr = supportResistance(history);
+      support = sr.support;
+      resistance = sr.resistance;
+      const range = resistance - support;
+      atrStop = support - range * 0.1;
+      atrStopShort = resistance + range * 0.1;
+      levelsNote = "Historique insuffisant pour une analyse technique complète (moins de 60 jours) — niveaux basés sur le min/max de la période disponible, verdict basé sur les actualités";
+    } else {
+      levelsNote = "Historique de prix indisponible — verdict basé uniquement sur les actualités";
+    }
+
     const reasoning = [
-      history
-        ? "Historique insuffisant pour une analyse technique complète (moins de 60 jours) — verdict basé sur les actualités uniquement"
-        : "Historique de prix indisponible gratuitement pour l'or/l'argent — verdict basé sur les actualités uniquement",
+      levelsNote,
       news
         ? `Actualités : ton ${news.label} sur ${news.articleCount} articles récents`
         : newsError
         ? `Actualités indisponibles : ${newsError}`
         : "Actualités non incluses",
     ];
+
     return {
       symbol: query.toUpperCase(),
       price: price.price,
-      support: null,
-      resistance: null,
+      support,
+      resistance,
       verdict,
       score: news?.label === "positif" ? 1 : news?.label === "négatif" ? -1 : 0,
       reasoning,
       news,
-      atrStop: null,
-      atrStopShort: null,
+      atrStop,
+      atrStopShort,
       sentinel: null,
     };
   }
