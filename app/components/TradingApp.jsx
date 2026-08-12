@@ -1629,13 +1629,37 @@ function TopMarkets({ onSendToCalculator, onGoToHistorique }) {
             // Pour une position déjà ouverte gérée depuis l'Historique
             // (stop/objectif proche ou atteint, ou retournement), le clic
             // amène vers l'onglet Historique plutôt que de proposer un
-            // nouveau trade. "Renforcer" et l'absence de position ouverte
-            // continuent d'envoyer vers le Calculateur.
+            // nouveau trade. "Renforcer" pré-remplit le Calculateur en
+            // combinant l'historique (montant investi, levier, sens, actif
+            // — tirés du trade ouvert lui-même) et l'analyse en cours de
+            // l'appli (prix d'entrée, stop, take-profit recalculés à
+            // l'instant T par le moteur). L'absence de position ouverte
+            // envoie vers le Calculateur comme pour un nouveau trade.
             const handleClick = () => {
               if (guidance && guidance.key !== "renforcer" && guidance.key !== "patienter") {
                 onGoToHistorique();
                 return;
               }
+
+              if (guidance && guidance.key === "renforcer") {
+                const isLong = matchedTrade.direction !== "short";
+                onSendToCalculator({
+                  entry: buyPrice,
+                  stop: isLong ? r.atrStop : r.atrStopShort,
+                  takeProfit: r.takeProfit,
+                  support: r.support,
+                  resistance: r.resistance,
+                  assetType: matchedTrade.assetType,
+                  direction: matchedTrade.direction,
+                  symbol: matchedTrade.symbol,
+                  rawQuery: r.rawQuery || r.query,
+                  verdict: r.verdict,
+                  invested: matchedTrade.invested,
+                  leverage: matchedTrade.leverage,
+                });
+                return;
+              }
+
               onSendToCalculator({
                 entry: buyPrice,
                 stop: stopPrice,
