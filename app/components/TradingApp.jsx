@@ -24,6 +24,7 @@ const MUTED = "#8A93A6";
 const LINE = "#232C3D";
 const POS = "#3DD68C";
 const NEG = "#FF6767";
+const AMBER = "#FCD34D"; // amber-300
 
 // ---------- Helper: extrait un message d'erreur exploitable d'une réponse Alpha Vantage ----------
 // Alpha Vantage renvoie l'erreur / le message de quota sous des clés différentes
@@ -1253,21 +1254,34 @@ function TopMarkets({ onSendToCalculator }) {
       else fastIndexes.push(idx);
     });
 
-    const runOne = async (idx) => {
+    const runOne = async (idx, attempt = 0) => {
       const item = WATCHLIST[idx];
       try {
         const r = await runMarketAnalysis(item.type, item.query);
         markDone(idx, { ...r, label: item.label, type: item.type, query: item.query });
       } catch (e) {
+        const isFx = item.type === "fx" && !isMetal(item.query);
+        // Un seul retry, et seulement pour crypto/métaux (pas les devises,
+        // pour ne pas gaspiller le quota Alpha Vantage) : CoinGecko renvoie
+        // souvent une erreur passagère de rate-limit sur les scans à 8 actifs.
+        if (!isFx && attempt < 1) {
+          await new Promise((res) => setTimeout(res, 2000));
+          return runOne(idx, attempt + 1);
+        }
         markDone(idx, { label: item.label, type: item.type, query: item.query, error: e.message });
       }
     };
 
-    const BATCH_SIZE = 4;
+    // Batches de 2 au lieu de 4, avec 1.5s de pause entre chaque batch :
+    // CoinGecko gratuit tolère mal plus de 2-3 requêtes concurrentes.
+    const BATCH_SIZE = 2;
     const runFast = async () => {
       for (let i = 0; i < fastIndexes.length; i += BATCH_SIZE) {
         const batch = fastIndexes.slice(i, i + BATCH_SIZE);
-        await Promise.all(batch.map(runOne));
+        await Promise.all(batch.map((idx) => runOne(idx)));
+        if (i + BATCH_SIZE < fastIndexes.length) {
+          await new Promise((res) => setTimeout(res, 1500));
+        }
       }
     };
 
@@ -1466,7 +1480,8 @@ function CalcField({ label, value, onChange, placeholder, readOnly = false }) {
 }
 
 function Calculateur({ prefill }) {
-  const [mode, setMode] = useState(prefill ? "auto" : "manual");
+  const hasFullLevels = (p) => p && p.entry != null && p.stop != null;
+  const [mode, setMode] = useState(hasFullLevels(prefill) ? "auto" : "manual");
   const [assetType, setAssetType] = useState(prefill?.assetType || "crypto");
   const [invested, setInvested] = useState(prefill?.invested?.toString() || "50");
   const [leverage, setLeverage] = useState(prefill?.leverage?.toString() || LEVERAGE_PRESETS[prefill?.assetType || "crypto"].leverage.toString());
@@ -1477,7 +1492,7 @@ function Calculateur({ prefill }) {
   useEffect(() => {
     if (!prefill) return;
     const nextAsset = prefill.assetType || "crypto";
-    setMode("auto");
+    setMode(hasFullLevels(prefill) ? "auto" : "manual");
     setAssetType(nextAsset);
     setInvested(prefill.invested?.toString() || "50");
     setLeverage(prefill.leverage?.toString() || LEVERAGE_PRESETS[nextAsset].leverage.toString());
@@ -1515,8 +1530,8 @@ function Calculateur({ prefill }) {
   return (
     <div>
       <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
-        <button onClick={() => setMode("auto")} style={{ flex: 1, padding: "9px 10px", borderRadius: 8, border: `1px solid ${mode === "auto" ? ACCENT : LINE}`, background: mode === "auto" ? "rgba(79,140,255,0.12)" : "transparent", color: mode === "auto" ? ACCENT : MUTED, fontWeight: 700, fontSize: 13, cursor: "pointer" }}>⚡ Automatique — Signal</button>
-        <button onClick={() => setMode("manual")} style={{ flex: 1, padding: "9px 10px", borderRadius: 8, border: `1px solid ${mode === "manual" ? ACCENT : LINE}`, background: mode === "manual" ? "rgba(79,140,255,0.12)" : "transparent", color: mode === "manual" ? ACCENT : MUTED, fontWeight: 700, fontSize: 13, cursor: "pointer" }}>✎ Manuel</button>
+       <button onClick={() => setMode("auto")} style={{ flex: 1, padding: "9px 10px", borderRadius: 8, border: `1px solid ${mode === "auto" ? AMBER : LINE}`, background: mode === "auto" ? "rgba(252,211,77,0.12)" : "transparent", color: mode === "auto" ? AMBER : MUTED, fontWeight: 700, fontSize: 13, cursor: "pointer" }}>⚡ Automatique — Signal</button>
+        <button onClick={() => setMode("manual")} style={{ flex: 1, padding: "9px 10px", borderRadius: 8, border: `1px solid ${mode === "manual" ? AMBER : LINE}`, background: mode === "manual" ? "rgba(252,211,77,0.12)" : "transparent", color: mode === "manual" ? AMBER : MUTED, fontWeight: 700, fontSize: 13, cursor: "pointer" }}>✎ Manuel</button> 
       </div>
 
       {prefill?.symbol && (
