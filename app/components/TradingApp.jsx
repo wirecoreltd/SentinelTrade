@@ -562,19 +562,31 @@ const PROJECTED_RR = 2;
 // affiché (cas vu sur Bitcoin / Dogecoin).
 const ATR_FALLBACK_STOP_MULT = 1.5;
 
+// Repli en pourcentage du prix quand l'ATR est indisponible (ex: Dogecoin,
+// dont le calcul ATR peut échouer selon la forme de son historique
+// CoinGecko en clôture-à-clôture). Sans ce filet, computeTradeLevels
+// renvoyait un objet entièrement vide dès la première ligne, avant même
+// d'atteindre les fallbacks internes déjà en place plus bas — l'actif
+// restait WAIT sans aucun prix affiché, contrairement à un stop ATR
+// classique qui reste au moins approximatif.
+const PRICE_PCT_FALLBACK_STOP = 0.03; // 3% du prix courant
+
 function computeTradeLevels({ verdict, currentPrice, support, resistance, atr }) {
-  if (atr == null) return { stop: null, target: null, riskReward: null, projected: false };
+  // atr peut être null (historique insuffisant pour Wilder-14, ou données
+  // trop plates) : on substitue un pseudo-ATR basé sur 3% du prix courant
+  // pour ne jamais renvoyer un résultat totalement vide.
+  const effectiveAtr = atr != null ? atr : currentPrice * PRICE_PCT_FALLBACK_STOP;
 
   if (verdict === "haussier") {
     if (support == null) return { stop: null, target: null, riskReward: null, projected: false };
-    let stop = support - 1.2 * atr;
+    let stop = support - 1.2 * effectiveAtr;
     let risk = currentPrice - stop;
     let projected = false;
     if (risk <= 0) {
       // Niveau structurel invalide relativement au prix courant : on
-      // retombe sur un stop purement basé sur l'ATR, qui garantit toujours
-      // un risque positif.
-      stop = currentPrice - ATR_FALLBACK_STOP_MULT * atr;
+      // retombe sur un stop purement basé sur l'ATR (ou son repli en %),
+      // qui garantit toujours un risque positif.
+      stop = currentPrice - ATR_FALLBACK_STOP_MULT * effectiveAtr;
       risk = currentPrice - stop;
       projected = true;
     }
@@ -594,18 +606,12 @@ function computeTradeLevels({ verdict, currentPrice, support, resistance, atr })
 
   if (verdict === "baissier") {
     if (resistance == null) return { stop: null, target: null, riskReward: null, projected: false };
-    const stop = resistance + 1.2 * atr;
-    const risk = stop - currentPrice;
-    if (risk <= 0) return { stop, target: null, riskReward: null, projected: false };
-
-    let target = null;
+    let stop = resistance + 1.2 * effectiveAtr;
+    let risk = stop - currentPrice;
     let projected = false;
-    if (support != null && support < currentPrice) {
-      const rr = (currentPrice - support) / risk;
-      if (rr >= MIN_STRUCTURAL_RR) target = support;
-    }
-    if (target == null) {
-      target = currentPrice - PROJECTED_RR * risk;
+    if (risk <= 0) {
+      stop = currentPrice + ATR_FALLBACK_STOP_MULT * effectiveAtr;
+      risk = stop - currentPrice;
       projected = true;
     }
     const riskReward = (currentPrice - target) / risk;
