@@ -105,16 +105,6 @@ async function fetchCoinGeckoTop(n = 10) {
   // vraies bougies OHLC. On approxime high = low = close : l'ATR/ADX calculés
   // dessus sont donc une volatilité clôture-à-clôture, pas une vraie amplitude
   // intrajournalière. C'est signalé dans le raisonnement du Dossier.
-  return data.prices.map(([ts, price]) => ({ date: ts, close: price, high: price, low: price }));
-}
-
-async function fetchCoinGeckoTop(n = 10) {
-  const res = await fetch(
-    `https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=${n}&page=1&price_change_percentage=24h`
-  );
-  if (!res.ok) throw new Error("Scanner indisponible");
-  return res.json();
-}
 
 async function fetchAlphaQuote(symbol) {
   const res = await fetch(`/api/stock?symbol=${encodeURIComponent(symbol)}&kind=quote`);
@@ -1291,14 +1281,6 @@ function TopMarkets({ onSendToCalculator }) {
     setResults([]);
     setProgress({ done: 0, total: WATCHLIST.length });
 
-    const BATCH_SIZE = 4;
-    const runFast = async () => {
-      for (let i = 0; i < fastIndexes.length; i += BATCH_SIZE) {
-        const batch = fastIndexes.slice(i, i + BATCH_SIZE);
-        await Promise.all(batch.map((idx) => runOne(idx)));
-      }
-    };
-
     const settled = new Array(WATCHLIST.length);
     let doneCount = 0;
     const markDone = (idx, value) => {
@@ -1338,16 +1320,11 @@ function TopMarkets({ onSendToCalculator }) {
       }
     };
 
-    // Batches de 2 au lieu de 4, avec 1.5s de pause entre chaque batch :
-    // CoinGecko gratuit tolère mal plus de 2-3 requêtes concurrentes.
-    const BATCH_SIZE = 2;
+    const BATCH_SIZE = 4;
     const runFast = async () => {
       for (let i = 0; i < fastIndexes.length; i += BATCH_SIZE) {
         const batch = fastIndexes.slice(i, i + BATCH_SIZE);
         await Promise.all(batch.map((idx) => runOne(idx)));
-        if (i + BATCH_SIZE < fastIndexes.length) {
-          await new Promise((res) => setTimeout(res, 1500));
-        }
       }
     };
 
