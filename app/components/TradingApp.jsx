@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import { calculateSentinelScore } from "./sentinel-engine";
 import {
   Search,
   LineChart,
@@ -309,6 +310,110 @@ function calcRSI(closes, period = 14) {
   return out;
 }
 
+// ---------- Indicateurs additionnels pour Sentinel Engine ----------
+
+function calcMACD(closes, fast = 12, slow = 26, signalPeriod = 9) {
+  const emaFast = calcEMA(closes, fast);
+  const emaSlow = calcEMA(closes, slow);
+  const macdLine = closes.map((_, i) => emaFast[i] - emaSlow[i]);
+  const signalLine = calcEMA(macdLine, signalPeriod);
+  const histogram = macdLine.map((v, i) => v - signalLine[i]);
+  return { macdLine, signalLine, histogram };
+}
+
+function calcATRAverage(atrSeries, period = 50) {
+  const valid = atrSeries.filter((v) => v != null);
+  if (valid.length === 0) return null;
+  const slice = valid.slice(-period);
+  return slice.reduce((a, b) => a + b, 0) / slice.length;
+}
+
+function volatilityRegimeLabel(atr, atrAvg) {
+  if (atr == null || atrAvg == null || atrAvg === 0) return null;
+  const ratio = atr / atrAvg;
+  return ratio <= 1.3 ? "modérée" : "élevée";
+}
+
+// Cassure du niveau clé (support/résistance de structure) suivie d'un retour
+// à proximité de ce niveau (dans un rayon de 0.5 ATR) : signe de retest validé.
+function detectBreakoutRetest(history, structure, atr) {
+  if (!structure || structure.resistance == null || structure.support == null || atr == null) {
+    return { active: false };
+  }
+  const closes = history.map((h) => h.close);
+  const n = closes.length;
+  const level = structure.regime === "haussier" ? structure.resistance
+    : structure.regime === "baissier" ? structure.support
+    : null;
+  if (level == null) return { active: false };
+  const lookback = closes.slice(Math.max(0, n - 10), n);
+  const broke = structure.regime === "haussier"
+    ? lookback.some((c) => c > level)
+    : lookback.some((c) => c < level);
+  const current = closes[n - 1];
+  const nearLevel = Math.abs(current - level) <= atr * 0.5;
+  return { active: broke && nearLevel };
+}
+
+// Prix revenu proche de l'EMA20 sans que la structure ne se soit inversée.
+function detectPullback(currentPrice, ema20, structure) {
+  if (ema20 == null || !structure) return { active: false };
+  const distPct = (Math.abs(currentPrice - ema20) / ema20) * 100;
+  const inTrend = structure.regime === "haussier" || structure.regime === "baissier";
+  return { active: inTrend && distPct <= 1.5 && !structure.choch };
+}
+
+// Prix étiré loin de sa moyenne (≥2 ATR) avec un RSI en zone extrême.
+function detectMeanReversion(currentPrice, ema20, atr, rsi) {
+  if (ema20 == null || atr == null || rsi == null) return { active: false };
+  const distanceInATR = Math.abs(currentPrice - ema20) / atr;
+  const extreme = rsi > 75 || rsi < 25;
+  return { active: distanceInATR >= 2 && extreme };
+}
+
+// Points pivots classiques calculés sur la dernière période complète.
+function calcPivotPoints(history) {
+  if (!history || history.length < 2) return null;
+  const prev = history[history.length - 2];
+  const { high, low, close } = prev;
+  const p = (high + low + close) / 3;
+  return {
+    pivot: p,
+    r1: 2 * p - low,
+    s1: 2 * p - high,
+    r2: p + (high - low),
+    s2: p - (high - low),
+  };
+}
+
+// Retracements Fibonacci entre le swing low et le swing high de structure.
+function calcFibRetracement(structure) {
+  if (!structure || structure.support == null || structure.resistance == null) return null;
+  const { support: low, resistance: high } = structure;
+  const range = high - low;
+  if (range <= 0) return null;
+  return {
+    "0.236": high - range * 0.236,
+    "0.382": high - range * 0.382,
+    "0.5": high - range * 0.5,
+    "0.618": high - range * 0.618,
+    "0.786": high - range * 0.786,
+  };
+}
+
+// Ratio risque/récompense basé sur les mêmes stops ATR que ceux déjà
+// envoyés au calculateur (atrStop / atrStopShort).
+function calcRiskReward(verdict, currentPrice, atrStop, atrStopShort, support, resistance) {
+  const stop = verdict === "baissier" ? atrStopShort : atrStop;
+  const target = verdict === "baissier" ? support : resistance;
+  if (stop == null || target == null) return null;
+  const risk = Math.abs(currentPrice - stop);
+  const reward = Math.abs(target - currentPrice);
+  if (risk === 0) return null;
+  return { ratio: reward / risk, risk, reward, stop, target };
+}
+
+
 // Nuage d'Ichimoku. cloudTopAt(i)/cloudBottomAt(i) renvoient le nuage tel
 // qu'il serait affiché au jour i (projection standard de 26 périodes).
 function calcIchimoku(history) {
@@ -455,6 +560,7 @@ async function runMarketAnalysis(type, query) {
       news,
       atrStop: null,
       atrStopShort: null,
+      sentinel: null,
     };
   }
 
@@ -525,6 +631,8 @@ async function runMarketAnalysis(type, query) {
 
   const support = structure.support;
   const resistance = structure.resistance;
+  const atrStop = support != null && atr != null ? support - 1.2 * atr : null;
+  const atrStopShort = resistance != null && atr != null ? resistance + 1.2 * atr : null;
   // Stop-loss basé sur la volatilité réelle (ATR) plutôt qu'un pourcentage
   // fixe : plus l'actif est volatil, plus le stop est éloigné de l'entrée.
   const atrStop = support != null && atr != null ? support - 1.2 * atr : null;
@@ -570,6 +678,65 @@ async function runMarketAnalysis(type, query) {
     news,
     atrStop,
     atrStopShort,
+  };
+}
+
+ const macd = calcMACD(closes);
+  const macdHistogramLast = macd.histogram[lastIdx];
+
+  const atrSeries = calcATR(history, 14);
+  const atrAvg = calcATRAverage(atrSeries, 50);
+  const volatilityRegime = volatilityRegimeLabel(atr, atrAvg);
+
+  const breakoutRetest = detectBreakoutRetest(history, structure, atr);
+  const pullback = detectPullback(currentPrice, ema20, structure);
+  const meanReversion = detectMeanReversion(currentPrice, ema20, atr, rsi);
+
+  const pivots = calcPivotPoints(history);
+  const fibRetracement = calcFibRetracement(structure);
+  const riskReward = calcRiskReward(verdict, currentPrice, atrStop, atrStopShort, support, resistance);
+
+  // Sentinel attend `structure.direction` OU `structure.regime` selon les
+  // fonctions internes du moteur (incohérence dans sentinel-engine.js) :
+  // on fournit les deux pour couvrir tous les cas.
+  const sentinelInput = {
+    currentPrice,
+    support,
+    resistance,
+    structure: { ...structure, direction: structure.regime },
+    ema20,
+    ema50,
+    adx: adxLast,
+    plusDI: plusDILast,
+    minusDI: minusDILast,
+    rsi,
+    atr,
+    atrAvg,
+    volatilityRegime,
+    macd: { histogram: macdHistogramLast },
+    breakoutRetest,
+    pullback,
+    meanReversion,
+    pivots,
+    fibRetracement,
+    riskReward,
+    verdict,
+  };
+
+  const sentinel = calculateSentinelScore(sentinelInput);
+
+  return {
+    symbol: query.toUpperCase(),
+    price: currentPrice,
+    support,
+    resistance,
+    verdict,
+    score: bull - bear,
+    reasoning,
+    news,
+    atrStop,
+    atrStopShort,
+    sentinel, // { score, bias, setup, status, breakdown, reasons, warnings }
   };
 }
 
@@ -956,6 +1123,17 @@ function Dossier({ setTab, setPrefillCalc }) {
             </div>
           </div>
 
+          {dossier.sentinel && (
+            <div style={{ marginTop: 10, borderTop: `1px solid ${LINE}`, paddingTop: 10 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+                <span style={{ fontSize: 12, color: MUTED }}>Sentinel Score</span>
+                <span style={{ fontSize: 13, fontWeight: 700 }}>
+                  {dossier.sentinel.score}/100 — {dossier.sentinel.status}
+                </span>
+              </div>
+            </div>
+          )}
+                    
           <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 14 }}>
             {dossier.reasoning.map((line, i) => (
               <div key={i} style={{ fontSize: 13, color: MUTED, display: "flex", gap: 6 }}>
