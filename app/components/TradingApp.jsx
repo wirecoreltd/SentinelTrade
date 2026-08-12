@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { calculateSentinelScore } from "./sentinel-engine";
+import { calculateSentinelScore } from "../lib/sentinelEngine";
 import {
   Search,
   LineChart,
