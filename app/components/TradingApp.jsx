@@ -3,6 +3,8 @@
 import { useState, useEffect, useCallback } from "react";
 import { calculateSentinelScore } from "../lib/sentinelEngine";
 import {
+  Search,
+  LineChart,
   FileText,
   Calculator,
   Loader2,
@@ -143,18 +145,6 @@ async function fetchCoinGeckoTop(n = 10) {
   });
 }
 
-// Logos + variation 24h pour un lot de cryptos en un seul appel groupé
-// (au lieu d'un appel par actif). Utilisé par le Top 15 pour afficher les
-// petits logos et les pourcentages de variation.
-async function fetchCoinGeckoMarketsByIds(ids) {
-  if (!ids || ids.length === 0) return [];
-  return coingeckoProxy("coins/markets", {
-    vs_currency: "usd",
-    ids: ids.join(","),
-    price_change_percentage: "24h",
-  }).catch(() => []);
-}
-
 async function fetchAlphaQuote(symbol) {
   return cachedFetch(`quote:${symbol}`, async () => {
     const res = await fetch(`/api/stock?symbol=${encodeURIComponent(symbol)}&kind=quote`);
@@ -253,6 +243,20 @@ async function fetchNewsSentiment(query) {
 }
 
 // ---------- Calculs ----------
+function trendFromHistory(history, days) {
+  if (!history || history.length < 2) return null;
+  const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+  const inWindow = history.filter((h) => new Date(h.date).getTime() >= cutoff);
+  const series = inWindow.length >= 2 ? inWindow : history;
+  const first = series[0].close;
+  const last = series[series.length - 1].close;
+  const pct = ((last - first) / first) * 100;
+  let direction = "plat";
+  if (pct > 1) direction = "haussier";
+  else if (pct < -1) direction = "baissier";
+  return { pct, direction };
+}
+
 function supportResistance(history) {
   const closes = history.map((h) => h.close);
   return { support: Math.min(...closes), resistance: Math.max(...closes) };
@@ -634,17 +638,6 @@ async function runMarketAnalysis(type, query) {
     ]);
   }
 
-  // Variation 24h : on prend celle fournie directement par la source
-  // (CoinGecko / Alpha Vantage) quand elle existe ; sinon (devises, sans
-  // "10. change percent" côté FX) on la dérive de l'avant-dernière clôture
-  // de l'historique.
-  let change24h = price.change24h;
-  if (change24h == null && history && history.length >= 2) {
-    const prevClose = history[history.length - 2].close;
-    const lastClose = history[history.length - 1].close;
-    if (prevClose) change24h = ((lastClose - prevClose) / prevClose) * 100;
-  }
-
   let news = null;
   let newsError = "";
   try {
@@ -660,22 +653,28 @@ async function runMarketAnalysis(type, query) {
     if (news?.label === "positif") verdict = "haussier";
     else if (news?.label === "négatif") verdict = "baissier";
 
-    // Direction utilisée pour calculer des niveaux d'achat/vente à
-    // afficher même quand le verdict est neutre (WAIT) — par défaut
-    // haussier faute d'autre signal directionnel disponible ici.
-    const levelsDirection = verdict === "baissier" ? "baissier" : "haussier";
-
+    // Pas assez (ou pas du tout) d'historique pour un vrai calcul
+    // technique. Si le verdict est directionnel, on dérive quand même des
+    // niveaux exploitables pour que l'auto-remplissage (Top 15 +
+    // Calculateur) fonctionne. Si le verdict est neutre (mitigé), on
+    // n'affiche aucun niveau : pas de signal, pas de trade proposé.
     let support = null, resistance = null, atrStop = null, atrStopShort = null;
     let takeProfit = null, riskReward = null;
     let levelsNote;
 
-    if (metal) {
+    if (verdict === "mitigé") {
+      levelsNote = metal
+        ? "Historique de prix indisponible gratuitement pour l'or/l'argent — actualités neutres, aucun signal directionnel ni niveau de trade proposé"
+        : history
+        ? "Historique insuffisant pour une analyse technique complète (moins de 60 jours) — actualités neutres, aucun signal directionnel"
+        : "Historique de prix indisponible — actualités neutres, aucun signal directionnel";
+    } else if (metal) {
       // Or/argent : bande à ±1.5% du prix courant (heuristique, pas un
       // vrai support/résistance faute d'historique gratuit).
       const pct = 0.015;
       const bandLow = price.price * (1 - pct);
       const bandHigh = price.price * (1 + pct);
-      if (levelsDirection === "haussier") {
+      if (verdict === "haussier") {
         support = bandLow;
         atrStop = support * 0.995;
         resistance = bandHigh;
@@ -688,33 +687,24 @@ async function runMarketAnalysis(type, query) {
         takeProfit = support;
         riskReward = (price.price - takeProfit) / (atrStopShort - price.price);
       }
-      levelsNote =
-        verdict === "mitigé"
-          ? "Historique de prix indisponible gratuitement pour l'or/l'argent — actualités neutres, niveaux approximés à ±1,5% du prix courant à titre indicatif"
-          : "Historique de prix indisponible gratuitement pour l'or/l'argent — niveaux approximés à ±1,5% du prix courant (pas un calcul technique réel), verdict basé sur les actualités";
+      levelsNote = "Historique de prix indisponible gratuitement pour l'or/l'argent — niveaux approximés à ±1,5% du prix courant (pas un calcul technique réel), verdict basé sur les actualités";
     } else if (history && history.length >= 2) {
       const sr = supportResistance(history);
       support = sr.support;
       resistance = sr.resistance;
       const range = resistance - support;
-      if (levelsDirection === "haussier" && range > 0) {
+      if (verdict === "haussier" && range > 0) {
         atrStop = support - range * 0.1;
         takeProfit = resistance;
         riskReward = (takeProfit - price.price) / (price.price - atrStop);
-      } else if (levelsDirection === "baissier" && range > 0) {
+      } else if (verdict === "baissier" && range > 0) {
         atrStopShort = resistance + range * 0.1;
         takeProfit = support;
         riskReward = (price.price - takeProfit) / (atrStopShort - price.price);
       }
-      levelsNote =
-        verdict === "mitigé"
-          ? "Historique insuffisant pour une analyse technique complète (moins de 60 jours) — actualités neutres, niveaux basés sur le min/max de la période disponible à titre indicatif"
-          : "Historique insuffisant pour une analyse technique complète (moins de 60 jours) — niveaux basés sur le min/max de la période disponible, verdict basé sur les actualités";
+      levelsNote = "Historique insuffisant pour une analyse technique complète (moins de 60 jours) — niveaux basés sur le min/max de la période disponible, verdict basé sur les actualités";
     } else {
-      levelsNote =
-        verdict === "mitigé"
-          ? "Historique de prix indisponible — actualités neutres, aucun signal directionnel"
-          : "Historique de prix indisponible — verdict basé uniquement sur les actualités";
+      levelsNote = "Historique de prix indisponible — verdict basé uniquement sur les actualités";
     }
 
     const reasoning = [
@@ -729,7 +719,6 @@ async function runMarketAnalysis(type, query) {
     return {
       symbol: query.toUpperCase(),
       price: price.price,
-      change24h,
       support,
       resistance,
       verdict,
@@ -812,14 +801,7 @@ async function runMarketAnalysis(type, query) {
   const support = structure.support;
   const resistance = structure.resistance;
 
-  // Direction utilisée pour calculer les niveaux d'achat/vente : celle du
-  // verdict quand il est directionnel, sinon un biais par défaut basé sur
-  // le vote technique (bull vs bear) — pour toujours pouvoir afficher un
-  // prix d'achat et un prix de vente, même sur un signal WAIT.
-  const levelsDirection =
-    verdict === "baissier" ? "baissier" : verdict === "haussier" ? "haussier" : bull >= bear ? "haussier" : "baissier";
-
-  const tradeLevels = computeTradeLevels({ verdict: levelsDirection, currentPrice, support, resistance, atr });
+  const tradeLevels = computeTradeLevels({ verdict, currentPrice, support, resistance, atr });
 
   // Garde-fou risque/récompense : même si le vote technique est
   // directionnel, on ne propose pas de trade si le ratio risque/récompense
@@ -832,13 +814,10 @@ async function runMarketAnalysis(type, query) {
   }
 
   const showTrade = verdict === "haussier" || verdict === "baissier";
-  // Niveaux toujours calculés et affichés (achat/vente) — seuls le badge
-  // GO/AVOID/WAIT et la mention "signal neutralisé" reflètent le verdict
-  // final.
-  const atrStop = levelsDirection === "haussier" ? tradeLevels.stop : null;
-  const atrStopShort = levelsDirection === "baissier" ? tradeLevels.stop : null;
-  const takeProfit = tradeLevels.target;
-  const riskReward = tradeLevels.riskReward;
+  const atrStop = showTrade && verdict === "haussier" ? tradeLevels.stop : null;
+  const atrStopShort = showTrade && verdict === "baissier" ? tradeLevels.stop : null;
+  const takeProfit = showTrade ? tradeLevels.target : null;
+  const riskReward = showTrade ? tradeLevels.riskReward : null;
 
   const trendLabel =
     ema20 != null && ema50 != null
@@ -862,9 +841,8 @@ async function runMarketAnalysis(type, query) {
       `RSI(14) : ${rsi.toFixed(0)}${rsi > 75 ? " — suracheté, prudence" : rsi < 25 ? " — survendu, prudence" : ""}`,
     atr != null &&
       `ATR(14) : $${formatPrice(atr)} (volatilité${type === "crypto" ? ", approximée en clôture-à-clôture faute d'OHLC gratuit" : ""})`,
-    tradeLevels.stop != null &&
-      tradeLevels.target != null &&
-      `Stop-loss : $${formatPrice(tradeLevels.stop)} — Take-profit : $${formatPrice(tradeLevels.target)} (R:R ${riskReward != null ? riskReward.toFixed(2) : "—"}:1${tradeLevels.projected ? ", cible projetée car le niveau structurel est déjà dépassé" : ""}${!showTrade ? " — indicatif, signal neutre" : ""})`,
+    showTrade &&
+      `Stop-loss : $${formatPrice(tradeLevels.stop)} — Take-profit : $${formatPrice(tradeLevels.target)} (R:R ${riskReward.toFixed(2)}:1${tradeLevels.projected ? ", cible projetée car le niveau structurel est déjà dépassé" : ""})`,
     rrDowngraded && "Signal neutralisé (WAIT) : ratio risque/récompense insuffisant sur ce setup",
     news
       ? `Actualités : ton ${news.label} sur ${news.articleCount} articles récents`
@@ -930,7 +908,6 @@ async function runMarketAnalysis(type, query) {
   return {
     symbol: query.toUpperCase(),
     price: currentPrice,
-    change24h,
     support,
     resistance,
     verdict,
@@ -943,6 +920,291 @@ async function runMarketAnalysis(type, query) {
     riskReward,
     sentinel, // { score, bias, setup, status, breakdown, reasons, warnings }
   };
+}
+
+// ---------- UI: petit composant de tendance ----------
+function TrendBadge({ label, trend }) {
+  if (!trend) return null;
+  const color = trend.direction === "haussier" ? POS : trend.direction === "baissier" ? NEG : MUTED;
+  const Icon = trend.direction === "haussier" ? TrendingUp : trend.direction === "baissier" ? TrendingDown : Minus;
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 6, background: NAVY, border: `1px solid ${LINE}`, borderRadius: 8, padding: "8px 10px" }}>
+      <Icon size={14} color={color} />
+      <div>
+        <div style={{ fontSize: 11, color: MUTED }}>{label}</div>
+        <div style={{ fontSize: 13, fontWeight: 700, color }}>
+          {trend.direction} ({trend.pct > 0 ? "+" : ""}{trend.pct.toFixed(1)}%)
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ================= Scanner =================
+const FX_SHORTCUTS = [
+  { label: "Or (XAU)", type: "fx", query: "XAU" },
+  { label: "Argent (XAG)", type: "fx", query: "XAG" },
+  { label: "EUR/USD", type: "fx", query: "EUR" },
+  { label: "GBP/USD", type: "fx", query: "GBP" },
+];
+
+function Scanner({ onPick }) {
+  const [coins, setCoins] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    fetchCoinGeckoTop(10)
+      .then(setCoins)
+      .catch((e) => setError(e.message))
+      .finally(() => setLoading(false));
+  }, []);
+
+  return (
+    <div>
+      <div style={{ fontSize: 11, color: MUTED, marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.5 }}>
+        Or &amp; devises
+      </div>
+      <div style={{ display: "flex", gap: 6, marginBottom: 18, flexWrap: "wrap" }}>
+        {FX_SHORTCUTS.map((s) => (
+          <button
+            key={s.query}
+            onClick={() => onPick(s)}
+            style={{
+              padding: "8px 12px",
+              borderRadius: 20,
+              border: `1px solid ${LINE}`,
+              background: PANEL,
+              color: TEXT,
+              fontSize: 12,
+              fontWeight: 600,
+              cursor: "pointer",
+            }}
+          >
+            {s.label}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ fontSize: 13, color: MUTED, marginBottom: 14 }}>
+        Top 10 crypto par capitalisation — clique un actif pour l'ouvrir dans Prix &amp; Niveaux.
+      </div>
+      {loading && <Loader2 className="spin" size={20} color={ACCENT} />}
+      {error && <div style={{ color: NEG, fontSize: 13 }}>{error}</div>}
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {coins.map((c) => (
+          <button
+            key={c.id}
+            onClick={() => onPick({ type: "crypto", query: c.id })}
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              background: PANEL,
+              border: `1px solid ${LINE}`,
+              borderRadius: 10,
+              padding: "12px 14px",
+              cursor: "pointer",
+              color: TEXT,
+              textAlign: "left",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <img src={c.image} alt="" width={22} height={22} style={{ borderRadius: "50%" }} />
+              <div>
+                <div style={{ fontWeight: 600, fontSize: 14 }}>{c.name}</div>
+                <div style={{ fontSize: 11, color: MUTED, textTransform: "uppercase" }}>{c.symbol}</div>
+              </div>
+            </div>
+            <div style={{ textAlign: "right" }}>
+              <div style={{ fontWeight: 700, fontSize: 14 }}>${formatPrice(c.current_price)}</div>
+              <div style={{ fontSize: 12, color: c.price_change_percentage_24h >= 0 ? POS : NEG }}>
+                {c.price_change_percentage_24h >= 0 ? "+" : ""}
+                {c.price_change_percentage_24h?.toFixed(2)}%
+              </div>
+            </div>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ================= Prix & Niveaux =================
+function PrixNiveaux({ prefill, setTab, setPrefillCalc }) {
+  const [type, setType] = useState(prefill?.type || "crypto");
+  const [query, setQuery] = useState(prefill?.query || "");
+  const [result, setResult] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const runSearch = useCallback(async (t, q) => {
+    if (!q) return;
+    setLoading(true);
+    setError("");
+    setResult(null);
+    try {
+      if (t === "crypto") {
+        const [price, history] = await Promise.all([
+          fetchCoinGeckoPrice(q.toLowerCase()),
+          fetchCoinGeckoHistory(q.toLowerCase(), 30),
+        ]);
+        const { support, resistance } = supportResistance(history);
+        setResult({ ...price, support, resistance, symbol: q.toUpperCase() });
+      } else if (t === "fx") {
+        if (isMetal(q)) {
+          // Or / argent : prix temps réel via gold-api.com, pas d'historique
+          // gratuit disponible donc pas de support/résistance pour ces deux actifs.
+          const price = await fetchMetalPrice(q);
+          setResult({ ...price, support: null, resistance: null, symbol: `${q.toUpperCase()}/USD` });
+        } else {
+          const [price, history] = await Promise.all([
+            fetchFxQuote(q.toUpperCase()),
+            fetchFxHistory(q.toUpperCase()),
+          ]);
+          const { support, resistance } = supportResistance(history);
+          setResult({ ...price, support, resistance, symbol: `${q.toUpperCase()}/USD` });
+        }
+      } else {
+        const [price, history] = await Promise.all([
+          fetchAlphaQuote(q.toUpperCase()),
+          fetchAlphaHistory(q.toUpperCase()),
+        ]);
+        const { support, resistance } = supportResistance(history);
+        setResult({ ...price, support, resistance, symbol: q.toUpperCase() });
+      }
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (prefill?.query) runSearch(prefill.type, prefill.query);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefill]);
+
+  const TYPES = [
+    { id: "crypto", label: "Crypto" },
+    { id: "stock", label: "Actions" },
+    { id: "fx", label: "Devises & Or" },
+  ];
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+        {TYPES.map(({ id: t, label }) => (
+          <button
+            key={t}
+            onClick={() => setType(t)}
+            style={{
+              flex: 1,
+              padding: "8px 10px",
+              borderRadius: 8,
+              border: `1px solid ${type === t ? ACCENT : LINE}`,
+              background: type === t ? "rgba(79,140,255,0.12)" : "transparent",
+              color: type === t ? ACCENT : MUTED,
+              fontWeight: 600,
+              fontSize: 13,
+              cursor: "pointer",
+            }}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          runSearch(type, query);
+        }}
+        style={{ display: "flex", gap: 8, marginBottom: 16 }}
+      >
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder={type === "crypto" ? "ex: bitcoin" : type === "fx" ? "ex: XAU (or), EUR, GBP" : "ex: TSLA"}
+          style={{
+            flex: 1,
+            background: NAVY,
+            border: `1px solid ${LINE}`,
+            borderRadius: 8,
+            padding: "10px 12px",
+            color: TEXT,
+            fontSize: 14,
+          }}
+        />
+        <button
+          type="submit"
+          style={{ background: ACCENT, border: "none", borderRadius: 8, padding: "0 14px", cursor: "pointer" }}
+        >
+          <Search size={16} color="#fff" />
+        </button>
+      </form>
+
+      {loading && <Loader2 className="spin" size={20} color={ACCENT} />}
+      {error && <div style={{ color: NEG, fontSize: 13, marginBottom: 10 }}>{error}</div>}
+
+      {result && (
+        <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 12 }}>
+            <div style={{ fontSize: 15, fontWeight: 700 }}>{result.symbol}</div>
+            <div style={{ fontSize: 22, fontWeight: 700 }}>${formatPrice(result.price)}</div>
+          </div>
+
+          {result.support != null ? (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
+              <div style={{ background: NAVY, borderRadius: 8, padding: 10 }}>
+                <div style={{ fontSize: 11, color: MUTED }}>Support (30j)</div>
+                <div style={{ fontSize: 15, fontWeight: 700, color: POS }}>${formatPrice(result.support)}</div>
+              </div>
+              <div style={{ background: NAVY, borderRadius: 8, padding: 10 }}>
+                <div style={{ fontSize: 11, color: MUTED }}>Résistance (30j)</div>
+                <div style={{ fontSize: 15, fontWeight: 700, color: NEG }}>${formatPrice(result.resistance)}</div>
+              </div>
+            </div>
+          ) : (
+            <div style={{ fontSize: 12, color: MUTED, marginBottom: 12 }}>
+              Historique indisponible gratuitement pour l'or/l'argent — prix en temps réel uniquement.
+            </div>
+          )}
+
+          <button
+            onClick={() => {
+              setPrefillCalc({
+                entry: result.price,
+                stop: result.support != null ? result.support : "",
+                takeProfit: result.resistance != null ? result.resistance : "",
+                assetType: type === "crypto" ? "crypto" : type === "fx" && isMetal(query) ? "matieres" : type === "fx" ? "forex" : "actions",
+                direction: "long",
+                symbol: result.symbol,
+              });
+              setTab("calc");
+            }}
+            style={{
+              width: "100%",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 6,
+              background: "rgba(79,140,255,0.12)",
+              border: `1px solid ${ACCENT}`,
+              color: ACCENT,
+              borderRadius: 8,
+              padding: "9px 0",
+              fontSize: 13,
+              fontWeight: 600,
+              cursor: "pointer",
+            }}
+          >
+            <Send size={13} /> Envoyer au calculateur
+          </button>
+        </div>
+      )}
+    </div>
+  );
 }
 
 // ================= Dossier d'analyse =================
@@ -1174,21 +1436,13 @@ function TopMarkets({ onSendToCalculator }) {
   const [progress, setProgress] = useState({ done: 0, total: WATCHLIST.length });
   const [results, setResults] = useState([]);
   const [error, setError] = useState("");
+  const [hasRun, setHasRun] = useState(false);
 
   const runScan = useCallback(async () => {
     setLoading(true);
     setError("");
     setResults([]);
     setProgress({ done: 0, total: WATCHLIST.length });
-
-    // Logos + variation 24h pour les cryptos : un seul appel groupé
-    // (coins/markets avec ids=...) plutôt qu'un appel par actif.
-    const cryptoIds = WATCHLIST.filter((w) => w.type === "crypto").map((w) => w.query);
-    const marketsMeta = await fetchCoinGeckoMarketsByIds(cryptoIds);
-    const metaMap = {};
-    (marketsMeta || []).forEach((m) => {
-      metaMap[m.id] = m;
-    });
 
     const settled = new Array(WATCHLIST.length);
     let doneCount = 0;
@@ -1215,15 +1469,7 @@ function TopMarkets({ onSendToCalculator }) {
       const item = WATCHLIST[idx];
       try {
         const r = await runMarketAnalysis(item.type, item.query);
-        const meta = item.type === "crypto" ? metaMap[item.query] : null;
-        markDone(idx, {
-          ...r,
-          label: item.label,
-          type: item.type,
-          query: item.query,
-          image: meta?.image || null,
-          change24h: r.change24h != null ? r.change24h : meta?.price_change_percentage_24h ?? null,
-        });
+        markDone(idx, { ...r, label: item.label, type: item.type, query: item.query });
       } catch (e) {
         const isFx = item.type === "fx" && !isMetal(item.query);
         // Un seul retry, et seulement pour crypto/métaux (pas les devises,
@@ -1265,16 +1511,15 @@ function TopMarkets({ onSendToCalculator }) {
     if (failed.length > 0 && ok.length === 0) {
       setError("Le scan a échoué pour tous les marchés — réessaie plus tard.");
     }
+    setHasRun(true);
     setLoading(false);
   }, []);
 
-  // Scan automatique à l'ouverture de l'onglet — plus de bouton manuel.
-  // Le cache (15 min) sur les appels Alpha Vantage/CoinGecko limite les
-  // doublons si l'onglet est réouvert peu après.
-  useEffect(() => {
-    runScan();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // Plus de scan automatique à l'ouverture : chaque visite de l'onglet
+  // consommait 5 requêtes Alpha Vantage (quota de 25/jour en gratuit), donc
+  // 4-5 allers-retours suffisaient à tout épuiser. Le scan démarre
+  // uniquement sur clic ; le cache (15 min) limite les doublons si on
+  // relance sans avoir vraiment besoin de données plus fraîches.
 
   return (
     <div>
@@ -1289,6 +1534,28 @@ function TopMarkets({ onSendToCalculator }) {
           <Loader2 className="spin" size={16} color={ACCENT} />
           Analyse {progress.done}/{progress.total}…
         </div>
+      )}
+
+      {!loading && (
+        <button
+          onClick={runScan}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            background: hasRun ? "none" : "rgba(79,140,255,0.12)",
+            border: `1px solid ${hasRun ? LINE : ACCENT}`,
+            borderRadius: 20,
+            padding: "8px 14px",
+            color: hasRun ? MUTED : ACCENT,
+            fontSize: 12,
+            fontWeight: 600,
+            cursor: "pointer",
+            marginBottom: 16,
+          }}
+        >
+          <ListOrdered size={13} /> {hasRun ? "Actualiser" : "Lancer le scan"}
+        </button>
       )}
 
       {error && <div style={{ color: NEG, fontSize: 13, marginBottom: 10 }}>{error}</div>}
@@ -1311,16 +1578,15 @@ function TopMarkets({ onSendToCalculator }) {
             }
 
             const action = ACTION_MAP[r.verdict] || ACTION_MAP["mitigé"];
+            const isBullish = r.verdict === "haussier";
             const isBearish = r.verdict === "baissier";
             // L'entrée automatique est le prix courant. Le take-profit
             // vient du moteur (cible corrigée, cohérente avec le sens du
-            // signal, calculée même sur un WAIT) ; le stop-loss selon la
-            // direction.
+            // signal) ; le stop-loss selon la direction.
             const buyPrice = r.price;
             const sellPrice = r.takeProfit;
             const stopPrice = isBearish ? r.atrStopShort : r.atrStop;
             const hasLevels = sellPrice != null && stopPrice != null;
-            const hasChange = r.change24h != null;
 
             return (
               <button
@@ -1344,46 +1610,15 @@ function TopMarkets({ onSendToCalculator }) {
                   cursor: "pointer",
                   color: TEXT,
                   textAlign: "left",
-                  width: "100%",
                 }}
               >
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: hasLevels ? 10 : 0 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    {r.image ? (
-                      <img src={r.image} alt="" width={22} height={22} style={{ borderRadius: "50%", flexShrink: 0 }} />
-                    ) : (
-                      <div
-                        style={{
-                          width: 22,
-                          height: 22,
-                          borderRadius: "50%",
-                          background: NAVY,
-                          border: `1px solid ${LINE}`,
-                          flexShrink: 0,
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "center",
-                          fontSize: 9,
-                          color: MUTED,
-                          fontWeight: 700,
-                        }}
-                      >
-                        {(ticker || name).slice(0, 2)}
-                      </div>
+                  <div>
+                    <div style={{ fontWeight: 700, fontSize: 14 }}>{name}</div>
+                    {ticker && (
+                      <div style={{ fontSize: 11, color: MUTED, textTransform: "uppercase" }}>{ticker}</div>
                     )}
-                    <div>
-                      <div style={{ fontWeight: 700, fontSize: 14 }}>{name}</div>
-                      {ticker && <div style={{ fontSize: 11, color: MUTED, textTransform: "uppercase" }}>{ticker}</div>}
-                      <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginTop: 4 }}>
-                        <span style={{ fontSize: 13, fontWeight: 600 }}>${formatPrice(r.price)}</span>
-                        {hasChange && (
-                          <span style={{ fontSize: 11, fontWeight: 700, color: r.change24h >= 0 ? POS : NEG }}>
-                            {r.change24h >= 0 ? "+" : ""}
-                            {r.change24h.toFixed(2)}%
-                          </span>
-                        )}
-                      </div>
-                    </div>
+                    <div style={{ fontSize: 13, fontWeight: 600, marginTop: 4 }}>${formatPrice(r.price)}</div>
                   </div>
                   <div
                     style={{
@@ -1581,10 +1816,13 @@ function Calculateur({ prefill }) {
 // ================= App =================
 export default function TradingApp() {
   const [tab, setTab] = useState("top15");
+  const [prefillPrix, setPrefillPrix] = useState(null);
   const [prefillCalc, setPrefillCalc] = useState(null);
 
   const tabs = [
     { id: "top15", label: "Top 15", icon: ListOrdered },
+    { id: "scan", label: "Scanner", icon: Search },
+    { id: "prix", label: "Prix & Niveaux", icon: LineChart },
     { id: "dossier", label: "Dossier", icon: FileText },
     { id: "calc", label: "Calculateur", icon: Calculator },
   ];
@@ -1636,7 +1874,20 @@ export default function TradingApp() {
             }}
           />
         )}
-        {tab === "dossier" && <Dossier setTab={setTab} setPrefillCalc={setPrefillCalc} />}
+        {tab === "scan" && (
+          <Scanner
+            onPick={(r) => {
+              setPrefillPrix(r);
+              setTab("prix");
+            }}
+          />
+        )}
+        {tab === "prix" && (
+          <PrixNiveaux prefill={prefillPrix} setTab={setTab} setPrefillCalc={setPrefillCalc} />
+        )}
+        {tab === "dossier" && (
+          <Dossier setTab={setTab} setPrefillCalc={setPrefillCalc} />
+        )}
         {tab === "calc" && <Calculateur prefill={prefillCalc} />}
       </div>
     </div>
