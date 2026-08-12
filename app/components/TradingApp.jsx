@@ -1346,6 +1346,12 @@ function TopMarkets({ onSendToCalculator }) {
             const stopPrice = isBearish ? r.atrStopShort : r.atrStop;
             const hasLevels = sellPrice != null && stopPrice != null;
             const hasChange = r.change24h != null;
+            // R:R déjà calculé par runMarketAnalysis mais jusqu'ici jamais
+            // affiché dans le Top 15 — sans lui, deux signaux avec des
+            // % de mouvement très différents (ex: +3% vs +7,5%) sont
+            // indiscernables en qualité de setup (stop serré + bon R:R vs
+            // stop large + R:R faible peuvent donner le même % affiché).
+            const hasRR = r.riskReward != null && Number.isFinite(r.riskReward);
 
             return (
               <button
@@ -1426,7 +1432,7 @@ function TopMarkets({ onSendToCalculator }) {
                 </div>
 
                 {hasLevels && (
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: hasRR ? 8 : 0 }}>
                     <div style={{ background: NAVY, borderRadius: 8, padding: 8 }}>
                       <div style={{ fontSize: 10, color: MUTED }}>Prix d'achat</div>
                       <div style={{ fontSize: 13, fontWeight: 700, color: POS }}>${formatPrice(buyPrice)}</div>
@@ -1435,6 +1441,17 @@ function TopMarkets({ onSendToCalculator }) {
                       <div style={{ fontSize: 10, color: MUTED }}>Prix de vente</div>
                       <div style={{ fontSize: 13, fontWeight: 700, color: NEG }}>${formatPrice(sellPrice)}</div>
                     </div>
+                  </div>
+                )}
+
+                {hasLevels && hasRR && (
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: NAVY, borderRadius: 8, padding: "6px 8px" }}>
+                    <span style={{ fontSize: 10, color: MUTED }}>
+                      Stop-loss : ${formatPrice(stopPrice)}
+                    </span>
+                    <span style={{ fontSize: 11, fontWeight: 700, color: r.riskReward >= 1.5 ? POS : r.riskReward >= 1 ? AMBER : NEG }}>
+                      R:R {r.riskReward.toFixed(2)}:1
+                    </span>
                   </div>
                 )}
               </button>
