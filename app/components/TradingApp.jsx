@@ -898,8 +898,10 @@ async function runMarketAnalysis(type, query) {
       "Structure de marché indéterminée (pas assez de swing points) — niveaux approximés sur le min/max de la période",
     rsi != null &&
       `RSI(14) : ${rsi.toFixed(0)}${rsi > 75 ? " — suracheté, prudence" : rsi < 25 ? " — survendu, prudence" : ""}`,
-    atr != null &&
+   atr != null &&
       `ATR(14) : $${formatPrice(atr)} (volatilité${type === "crypto" ? ", approximée en clôture-à-clôture faute d'OHLC gratuit" : ""})`,
+    atr == null &&
+      "ATR indisponible sur cet historique — niveaux d'achat/vente non calculables pour cet actif",
     tradeLevels.stop != null &&
       tradeLevels.target != null &&
       `Stop-loss : $${formatPrice(tradeLevels.stop)} — Take-profit : $${formatPrice(tradeLevels.target)} (R:R ${riskReward != null ? riskReward.toFixed(2) : "—"}:1${tradeLevels.projected ? ", cible projetée car le niveau structurel est déjà dépassé" : ""}${!showTrade ? " — indicatif, signal neutre" : ""})`,
