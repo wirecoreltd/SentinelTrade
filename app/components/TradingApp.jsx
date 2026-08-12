@@ -38,6 +38,25 @@ async function cachedFetch(key, fetcher) {
   return data;
 }
 
+// ---------- File d'attente pour les appels /api/news ----------
+// Espace les appels vers /api/news d'au moins NEWS_MIN_GAP_MS, quel que soit
+// le parallélisme utilisé ailleurs (prix crypto/stock/fx). Ça évite de taper
+// le rate-limit de NewsData.io quand plusieurs actifs sont analysés d'un coup
+// (ex: le scan "Top 15").
+let newsQueue = Promise.resolve();
+const NEWS_MIN_GAP_MS = 600;
+
+function throttledNewsCall(fn) {
+  const run = newsQueue.then(async () => {
+    const result = await fn();
+    await new Promise((r) => setTimeout(r, NEWS_MIN_GAP_MS));
+    return result;
+  });
+  // Si un appel échoue, on ne bloque pas la file pour les suivants.
+  newsQueue = run.catch(() => {});
+  return run;
+}
+
 const METAL_SYMBOLS = ["XAU", "XAG"];
 function isMetal(symbol) {
   return METAL_SYMBOLS.includes(symbol.toUpperCase());
@@ -191,27 +210,34 @@ async function fetchFxHistory(symbol) {
   });
 }
 
+// Résultats mis en cache 15 min + appels espacés d'au moins 600ms entre eux
+// pour ne pas déclencher le rate-limit de NewsData.io quand plusieurs actifs
+// sont analysés en même temps (ex: scan Top 15).
 async function fetchNewsSentiment(query) {
-  const res = await fetch(`/api/news?q=${encodeURIComponent(query)}`);
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || "Actualités indisponibles");
-  const articles = (data.results || []).slice(0, 15);
+  return cachedFetch(`news:${query}`, () =>
+    throttledNewsCall(async () => {
+      const res = await fetch(`/api/news?q=${encodeURIComponent(query)}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Actualités indisponibles");
+      const articles = (data.results || []).slice(0, 15);
 
-  const POS_WORDS = ["surge", "rally", "gain", "bullish", "soar", "jump", "rise", "beat", "strong", "growth", "upgrade", "hausse", "record"];
-  const NEG_WORDS = ["drop", "fall", "plunge", "bearish", "crash", "decline", "loss", "weak", "cut", "downgrade", "concern", "fear", "baisse", "chute"];
+      const POS_WORDS = ["surge", "rally", "gain", "bullish", "soar", "jump", "rise", "beat", "strong", "growth", "upgrade", "hausse", "record"];
+      const NEG_WORDS = ["drop", "fall", "plunge", "bearish", "crash", "decline", "loss", "weak", "cut", "downgrade", "concern", "fear", "baisse", "chute"];
 
-  let score = 0;
-  for (const a of articles) {
-    const text = `${a.title || ""} ${a.description || ""}`.toLowerCase();
-    for (const w of POS_WORDS) if (text.includes(w)) score += 1;
-    for (const w of NEG_WORDS) if (text.includes(w)) score -= 1;
-  }
+      let score = 0;
+      for (const a of articles) {
+        const text = `${a.title || ""} ${a.description || ""}`.toLowerCase();
+        for (const w of POS_WORDS) if (text.includes(w)) score += 1;
+        for (const w of NEG_WORDS) if (text.includes(w)) score -= 1;
+      }
 
-  let label = "mitigé";
-  if (score >= 2) label = "positif";
-  else if (score <= -2) label = "négatif";
+      let label = "mitigé";
+      if (score >= 2) label = "positif";
+      else if (score <= -2) label = "négatif";
 
-  return { label, score, articleCount: articles.length, headlines: articles.slice(0, 3).map((a) => a.title) };
+      return { label, score, articleCount: articles.length, headlines: articles.slice(0, 3).map((a) => a.title) };
+    })
+  );
 }
 
 function supportResistance(history) {
@@ -872,6 +898,8 @@ const RANGE_OPTIONS = [
   { key: "6m", label: "6M" },
 ];
 
+// Chandeliers en bleu (ACCENT) pour une bougie haussière, rouge (NEG) pour
+// une bougie baissière — remplace le vert/rouge par défaut.
 function CandleChart({ candles, overlays = [], height = 260 }) {
   if (!candles || candles.length === 0) return null;
 
@@ -946,7 +974,7 @@ function CandleChart({ candles, overlays = [], height = 260 }) {
       {candles.map((c, i) => {
         const x = padLeft + i * slot + slot / 2;
         const up = c.close >= c.open;
-        const color = up ? POS : NEG;
+        const color = up ? ACCENT : NEG;
         const bodyTop = yFor(Math.max(c.open, c.close));
         const bodyBottom = yFor(Math.min(c.open, c.close));
         const bodyH = Math.max(1, bodyBottom - bodyTop);
@@ -1008,8 +1036,9 @@ async function fetchCalculatorCandles({ assetType, rawQuery, rangeKey }) {
   return { candles, note };
 }
 
+// Range par défaut : 5J (au lieu de 1M)
 function TradeChart({ assetType, rawQuery, symbol, entry, stop, takeProfit, support, resistance }) {
-  const [range, setRange] = useState("1m");
+  const [range, setRange] = useState("5j");
   const [state, setState] = useState({ loading: true, error: "", candles: [], note: null });
   const cacheRef = useRef(new Map());
 
@@ -1834,7 +1863,7 @@ export default function TradingApp() {
   ];
 
   return (
-    <div style={{ minHeight: "100vh", background: NAVY, color: TEXT, padding: "28px 18px 60px" }}>
+    <div style={{ minHeight: "100vh", background: "#000000", color: TEXT, padding: "28px 18px 60px" }}>
       <style>{`
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
         .spin { animation: spin 0.8s linear infinite; }
