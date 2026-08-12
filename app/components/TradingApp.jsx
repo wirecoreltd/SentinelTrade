@@ -761,6 +761,7 @@ async function runMarketAnalysis(type, query) {
       support,
       resistance,
       verdict,
+      levelsDirection,
       score: news?.label === "positif" ? 1 : news?.label === "négatif" ? -1 : 0,
       reasoning,
       news,
@@ -971,6 +972,7 @@ async function runMarketAnalysis(type, query) {
     support,
     resistance,
     verdict,
+    levelsDirection,
     score: bull - bear,
     reasoning,
     news,
@@ -1135,10 +1137,10 @@ function Dossier({ setTab, setPrefillCalc }) {
             onClick={() => {
               setPrefillCalc({
                 entry: dossier.price,
-                stop: dossier.verdict === "baissier" ? dossier.atrStopShort : dossier.atrStop,
+                stop: dossier.levelsDirection === "baissier" ? dossier.atrStopShort : dossier.atrStop,
                 takeProfit: dossier.takeProfit,
                 assetType: type === "crypto" ? "crypto" : type === "fx" && isMetal(query) ? "matieres" : type === "fx" ? "forex" : "actions",
-                direction: dossier.verdict === "baissier" ? "short" : "long",
+                direction: dossier.levelsDirection === "baissier" ? "short" : "long",
                 symbol: dossier.symbol,
                 verdict: dossier.verdict,
               });
@@ -1348,14 +1350,22 @@ function TopMarkets({ onSendToCalculator }) {
             }
 
             const action = ACTION_MAP[r.verdict] || ACTION_MAP["mitigé"];
-            const isBearish = r.verdict === "baissier";
+            // Le stop-loss doit suivre la direction utilisée pour calculer
+            // les niveaux (levelsDirection), pas le verdict final : sur un
+            // WAIT, verdict et levelsDirection peuvent diverger (ex: vote
+            // technique légèrement baissier neutralisé par le garde-fou
+            // RSI/R:R). Utiliser verdict ici pointait vers un champ
+            // (atrStop / atrStopShort) resté à null, ce qui cassait
+            // l'affichage des niveaux sur certains actifs WAIT (cas
+            // observé sur Bitcoin / Dogecoin).
+            const isBearishLevels = r.levelsDirection === "baissier";
             // L'entrée automatique est le prix courant. Le take-profit
             // vient du moteur (cible corrigée, cohérente avec le sens du
             // signal, calculée même sur un WAIT) ; le stop-loss selon la
             // direction.
             const buyPrice = r.price;
             const sellPrice = r.takeProfit;
-            const stopPrice = isBearish ? r.atrStopShort : r.atrStop;
+            const stopPrice = isBearishLevels ? r.atrStopShort : r.atrStop;
             const hasLevels = sellPrice != null && stopPrice != null;
             const hasChange = r.change24h != null;
             // R:R déjà calculé par runMarketAnalysis mais jusqu'ici jamais
@@ -1374,7 +1384,7 @@ function TopMarkets({ onSendToCalculator }) {
                     stop: stopPrice,
                     takeProfit: sellPrice,
                     assetType: r.type === "crypto" ? "crypto" : r.type === "fx" && isMetal(r.query) ? "matieres" : r.type === "fx" ? "forex" : "actions",
-                    direction: isBearish ? "short" : "long",
+                    direction: isBearishLevels ? "short" : "long",
                     symbol: r.symbol || r.query.toUpperCase(),
                     verdict: r.verdict,
                   })
