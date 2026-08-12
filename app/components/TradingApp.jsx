@@ -553,18 +553,34 @@ function detectMarketStructure(history, span = 2) {
 const MIN_STRUCTURAL_RR = 1.2;
 const PROJECTED_RR = 2;
 
+// Distance de secours (en multiples d'ATR) utilisée pour le stop quand le
+// niveau structurel (support/résistance) donne un risque nul ou négatif —
+// typiquement quand le prix a déjà dépassé ce niveau dans le sens opposé à
+// la direction choisie pour les niveaux (ex: prix au-dessus de la
+// résistance alors qu'on calcule un stop "baissier"). Sans ce filet, la
+// fonction renvoyait target: null et l'actif restait WAIT sans aucun prix
+// affiché (cas vu sur Bitcoin / Dogecoin).
+const ATR_FALLBACK_STOP_MULT = 1.5;
+
 function computeTradeLevels({ verdict, currentPrice, support, resistance, atr }) {
   if (atr == null) return { stop: null, target: null, riskReward: null, projected: false };
 
   if (verdict === "haussier") {
     if (support == null) return { stop: null, target: null, riskReward: null, projected: false };
-    const stop = support - 1.2 * atr;
-    const risk = currentPrice - stop;
-    if (risk <= 0) return { stop, target: null, riskReward: null, projected: false };
+    let stop = support - 1.2 * atr;
+    let risk = currentPrice - stop;
+    let projected = false;
+    if (risk <= 0) {
+      // Niveau structurel invalide relativement au prix courant : on
+      // retombe sur un stop purement basé sur l'ATR, qui garantit toujours
+      // un risque positif.
+      stop = currentPrice - ATR_FALLBACK_STOP_MULT * atr;
+      risk = currentPrice - stop;
+      projected = true;
+    }
 
     let target = null;
-    let projected = false;
-    if (resistance != null && resistance > currentPrice) {
+    if (!projected && resistance != null && resistance > currentPrice) {
       const rr = (resistance - currentPrice) / risk;
       if (rr >= MIN_STRUCTURAL_RR) target = resistance;
     }
@@ -575,6 +591,33 @@ function computeTradeLevels({ verdict, currentPrice, support, resistance, atr })
     const riskReward = (target - currentPrice) / risk;
     return { stop, target, riskReward, projected };
   }
+
+  if (verdict === "baissier") {
+    if (resistance == null) return { stop: null, target: null, riskReward: null, projected: false };
+    let stop = resistance + 1.2 * atr;
+    let risk = stop - currentPrice;
+    let projected = false;
+    if (risk <= 0) {
+      stop = currentPrice + ATR_FALLBACK_STOP_MULT * atr;
+      risk = stop - currentPrice;
+      projected = true;
+    }
+
+    let target = null;
+    if (!projected && support != null && support < currentPrice) {
+      const rr = (currentPrice - support) / risk;
+      if (rr >= MIN_STRUCTURAL_RR) target = support;
+    }
+    if (target == null) {
+      target = currentPrice - PROJECTED_RR * risk;
+      projected = true;
+    }
+    const riskReward = (currentPrice - target) / risk;
+    return { stop, target, riskReward, projected };
+  }
+
+  return { stop: null, target: null, riskReward: null, projected: false };
+}
 
   if (verdict === "baissier") {
     if (resistance == null) return { stop: null, target: null, riskReward: null, projected: false };
