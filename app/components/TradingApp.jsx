@@ -13,6 +13,8 @@ import {
   ListOrdered,
   Lock,
   History as HistoryIcon,
+  CalendarRange,
+  ShieldCheck,
 } from "lucide-react";
 import { NAVY, PANEL, ACCENT, TEXT, MUTED, LINE, POS, NEG, AMBER, LOCKED_BG } from "../lib/theme";
 import { formatPrice } from "../lib/format";
@@ -1417,6 +1419,270 @@ const WATCHLIST = [
   { type: "fx", query: "CAD", label: "CAD/USD" },
 ];
 
+const LONG_TERM_WATCHLIST = [
+  { type: "crypto", query: "bitcoin", label: "Bitcoin (BTC)" },
+  { type: "crypto", query: "ethereum", label: "Ethereum (ETH)" },
+  { type: "crypto", query: "solana", label: "Solana (SOL)" },
+  { type: "crypto", query: "binancecoin", label: "BNB" },
+  { type: "crypto", query: "ripple", label: "XRP" },
+];
+
+const LONG_TERM_HORIZONS = [
+  { key: "1m", label: "1 mois", days: 30 },
+  { key: "3m", label: "3 mois", days: 90 },
+  { key: "6m", label: "6 mois", days: 180 },
+];
+
+function clampNumber(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function pctChangeFromHistory(history, days) {
+  if (!history || history.length < 2) return null;
+  const last = history[history.length - 1]?.close;
+  const targetDate = Date.now() - days * 24 * 60 * 60 * 1000;
+  let first = history.find((h) => new Date(h.date).getTime() >= targetDate)?.close;
+  if (first == null) first = history[0]?.close;
+  if (!Number.isFinite(first) || !Number.isFinite(last) || first === 0) return null;
+  return ((last - first) / first) * 100;
+}
+
+function rangeHighLow(history, days) {
+  if (!history?.length) return { high: null, low: null };
+  const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+  const rows = history.filter((h) => new Date(h.date).getTime() >= cutoff);
+  const source = rows.length ? rows : history;
+  return {
+    high: Math.max(...source.map((h) => h.high ?? h.close)),
+    low: Math.min(...source.map((h) => h.low ?? h.close)),
+  };
+}
+
+async function runLongTermAnalysis(item) {
+  const [price, history] = await Promise.all([
+    fetchCoinGeckoPrice(item.query),
+    fetchCoinGeckoHistory(item.query, 180),
+  ]);
+  if (!history || history.length < 60) throw new Error("Historique insuffisant");
+
+  const closes = history.map((h) => h.close);
+  const current = price.price;
+  const ema20Series = calcEMA(closes, 20);
+  const ema50Series = calcEMA(closes, 50);
+  const ema20 = ema20Series[ema20Series.length - 1];
+  const ema50 = ema50Series[ema50Series.length - 1];
+  const rsiSeries = calcRSI(closes, 14);
+  const rsi = rsiSeries[rsiSeries.length - 1];
+  const atrSeries = calcATR(history, 14);
+  const atr = atrSeries[atrSeries.length - 1];
+
+  const returns = {
+    "1m": pctChangeFromHistory(history, 30),
+    "3m": pctChangeFromHistory(history, 90),
+    "6m": pctChangeFromHistory(history, 180),
+  };
+
+  const horizonData = {};
+  for (const horizon of LONG_TERM_HORIZONS) {
+    const momentum = returns[horizon.key] ?? 0;
+    const trendScore = ema20 != null && ema50 != null
+      ? current > ema20 && ema20 > ema50 ? 1 : current < ema20 && ema20 < ema50 ? -1 : 0
+      : 0;
+    const rsiScore = rsi == null ? 0 : rsi >= 45 && rsi <= 68 ? 1 : rsi > 75 ? -1 : rsi < 30 ? -0.5 : 0;
+    const momentumScore = clampNumber(momentum / 20, -1.5, 1.5);
+    const score = momentumScore * 0.55 + trendScore * 0.30 + rsiScore * 0.15;
+    const label = score >= 0.65 ? "FAVORI" : score >= 0.15 ? "SURVEILLER" : "ATTENDRE";
+    const range = rangeHighLow(history, horizon.days);
+    const technicalResistance = range.high != null && range.high > current ? range.high : current * 1.10;
+    const technicalSupport = range.low != null && range.low < current ? range.low : current * 0.90;
+    const stop = Math.max(technicalSupport, current - Math.max(atr ?? current * 0.04, current * 0.04));
+    horizonData[horizon.key] = {
+      score,
+      label,
+      returnPct: momentum,
+      support: technicalSupport,
+      resistance: technicalResistance,
+      stop,
+      target: technicalResistance,
+    };
+  }
+
+  const score = Object.values(horizonData).reduce((sum, h) => sum + h.score, 0) / 3;
+  return {
+    ...item,
+    price: current,
+    change24h: price.change24h,
+    image: null,
+    ema20,
+    ema50,
+    rsi,
+    atr,
+    horizons: horizonData,
+    score,
+  };
+}
+
+function LongTermInvestissement({ onSendToCalculator }) {
+  const [horizon, setHorizon] = useState("3m");
+  const [loading, setLoading] = useState(false);
+  const [progress, setProgress] = useState({ done: 0, total: LONG_TERM_WATCHLIST.length });
+  const [results, setResults] = useState([]);
+  const [error, setError] = useState("");
+  const cacheRef = useRef(null);
+
+  const runScan = useCallback(async () => {
+    setError("");
+    if (cacheRef.current) {
+      const cached = cacheRef.current;
+      const ok = cached.filter((r) => !r.error).sort((a, b) => b.horizons[horizon].score - a.horizons[horizon].score);
+      const failed = cached.filter((r) => r.error);
+      setResults([...ok, ...failed]);
+      return;
+    }
+
+    setLoading(true);
+    setResults([]);
+    setProgress({ done: 0, total: LONG_TERM_WATCHLIST.length });
+    const settled = [];
+    for (const item of LONG_TERM_WATCHLIST) {
+      try {
+        settled.push(await runLongTermAnalysis(item));
+      } catch (e) {
+        settled.push({ ...item, error: e.message });
+      }
+      setProgress((p) => ({ ...p, done: p.done + 1 }));
+    }
+    cacheRef.current = settled;
+    const ok = settled.filter((r) => !r.error).sort((a, b) => b.horizons[horizon].score - a.horizons[horizon].score);
+    const failed = settled.filter((r) => r.error);
+    setResults([...ok, ...failed]);
+    if (!ok.length) setError("Impossible d'obtenir les données long terme pour le moment.");
+    setLoading(false);
+  }, [horizon]);
+
+  useEffect(() => {
+    runScan();
+  }, [runScan]);
+
+  const selectedHorizon = LONG_TERM_HORIZONS.find((h) => h.key === horizon);
+
+  return (
+    <div>
+      <div style={{ marginBottom: 14 }}>
+        <div style={{ fontSize: 13, color: MUTED, lineHeight: 1.55 }}>
+          Sélection long terme de 5 marchés crypto. Le classement utilise le momentum de la période,
+          la tendance EMA20/EMA50 et le RSI. Les niveaux affichés sont des repères techniques, pas une garantie de rendement.
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 6, marginBottom: 14, overflowX: "auto", paddingBottom: 2 }}>
+        {LONG_TERM_HORIZONS.map((h) => (
+          <button
+            key={h.key}
+            onClick={() => setHorizon(h.key)}
+            style={{
+              flex: "0 0 auto",
+              padding: "8px 13px",
+              borderRadius: 20,
+              border: `1px solid ${horizon === h.key ? ACCENT : LINE}`,
+              background: horizon === h.key ? "rgba(79,140,255,0.12)" : "transparent",
+              color: horizon === h.key ? ACCENT : MUTED,
+              fontSize: 12,
+              fontWeight: 700,
+              cursor: "pointer",
+            }}
+          >
+            {h.label}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 12, marginBottom: 14 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+          <CalendarRange size={15} color={ACCENT} />
+          <span style={{ fontSize: 12, fontWeight: 700 }}>Horizon sélectionné : {selectedHorizon.label}</span>
+        </div>
+        <div style={{ fontSize: 11, color: MUTED, lineHeight: 1.5 }}>
+          Pour un investissement long terme, le calculateur reste disponible avec les mêmes champs : mise, levier, entrée, stop-loss et take-profit. Pour un placement sans levier, sélectionne x1 dans le calculateur.
+        </div>
+      </div>
+
+      {loading && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, color: MUTED, fontSize: 13, marginBottom: 12 }}>
+          <Loader2 className="spin" size={15} color={ACCENT} /> Analyse long terme {progress.done}/{progress.total}…
+        </div>
+      )}
+      {error && <div style={{ color: NEG, fontSize: 13, marginBottom: 10 }}>{error}</div>}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
+        {results.map((r, index) => {
+          if (r.error) {
+            return <div key={r.query} style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: 12, color: NEG, fontSize: 12 }}>{r.label} — {r.error}</div>;
+          }
+          const h = r.horizons[horizon];
+          const verdictColor = h.label === "FAVORI" ? POS : h.label === "SURVEILLER" ? AMBER : MUTED;
+          return (
+            <div key={r.query} style={{ background: PANEL, border: `1px solid ${index === 0 ? ACCENT : LINE}`, borderRadius: 12, padding: 13 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "flex-start" }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <div style={{ width: 28, height: 28, borderRadius: "50%", background: NAVY, border: `1px solid ${LINE}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 800, flexShrink: 0 }}>
+                      {r.label.replace(/[^A-Z]/g, "").slice(0, 3) || r.query.slice(0, 3).toUpperCase()}
+                    </div>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: 14, fontWeight: 800 }}>{r.label}</div>
+                      <div style={{ fontSize: 12, color: MUTED }}>${formatPrice(r.price)} {r.change24h != null && <span style={{ color: r.change24h >= 0 ? POS : NEG }}>{r.change24h >= 0 ? "+" : ""}{r.change24h.toFixed(2)}%</span>}</div>
+                    </div>
+                  </div>
+                </div>
+                <div style={{ flexShrink: 0, textAlign: "right" }}>
+                  <div style={{ fontSize: 11, fontWeight: 800, color: verdictColor }}>{h.label}</div>
+                  <div style={{ fontSize: 11, color: MUTED, marginTop: 3 }}>#{index + 1}</div>
+                </div>
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0,1fr))", gap: 7, marginTop: 11 }}>
+                <div style={{ background: NAVY, borderRadius: 8, padding: 8 }}><div style={{ fontSize: 10, color: MUTED }}>{selectedHorizon.label} historique</div><div style={{ fontSize: 13, fontWeight: 800, color: h.returnPct >= 0 ? POS : NEG }}>{h.returnPct >= 0 ? "+" : ""}{h.returnPct.toFixed(1)}%</div></div>
+                <div style={{ background: NAVY, borderRadius: 8, padding: 8 }}><div style={{ fontSize: 10, color: MUTED }}>Objectif technique</div><div style={{ fontSize: 13, fontWeight: 800, color: POS }}>${formatPrice(h.target)}</div></div>
+                <div style={{ background: NAVY, borderRadius: 8, padding: 8 }}><div style={{ fontSize: 10, color: MUTED }}>Stop indicatif</div><div style={{ fontSize: 13, fontWeight: 800, color: NEG }}>${formatPrice(h.stop)}</div></div>
+                <div style={{ background: NAVY, borderRadius: 8, padding: 8 }}><div style={{ fontSize: 10, color: MUTED }}>RSI / tendance</div><div style={{ fontSize: 12, fontWeight: 700 }}>{r.rsi != null ? r.rsi.toFixed(0) : "—"} · {r.price > r.ema20 && r.ema20 > r.ema50 ? "haussière" : r.price < r.ema20 && r.ema20 < r.ema50 ? "baissière" : "mixte"}</div></div>
+              </div>
+
+              <button
+                onClick={() => onSendToCalculator({
+                  entry: r.price,
+                  stop: h.stop,
+                  takeProfit: h.target,
+                  support: h.support,
+                  resistance: h.resistance,
+                  assetType: "crypto",
+                  direction: "long",
+                  symbol: r.label,
+                  rawQuery: r.query,
+                  verdict: h.label === "FAVORI" ? "haussier" : "mitigé",
+                  leverage: 1,
+                  invested: 50,
+                  longTermHorizon: horizon,
+                })}
+                style={{ width: "100%", marginTop: 10, padding: "10px 12px", borderRadius: 8, border: `1px solid ${ACCENT}`, background: "rgba(79,140,255,0.10)", color: ACCENT, fontSize: 12, fontWeight: 800, cursor: "pointer" }}
+              >
+                Calculer mon investissement →
+              </button>
+            </div>
+          );
+        })}
+      </div>
+
+      <div style={{ display: "flex", gap: 8, alignItems: "flex-start", background: "rgba(61,214,140,0.06)", border: `1px solid ${LINE}`, borderRadius: 10, padding: 11, marginTop: 14 }}>
+        <ShieldCheck size={16} color={POS} style={{ flexShrink: 0, marginTop: 1 }} />
+        <div style={{ fontSize: 11, color: MUTED, lineHeight: 1.5 }}>
+          La mise, le levier et les niveaux restent calculés par le même moteur que le calculateur. Les performances passées ne garantissent pas les performances futures.
+        </div>
+      </div>
+    </div>
+  );
+}
+
 const ACTION_MAP = {
   haussier: { label: "GO", color: POS },
   baissier: { label: "AVOID", color: NEG },
@@ -2087,27 +2353,28 @@ export default function TradingApp() {
 
   const tabs = [
     { id: "top15", label: "Top 15", icon: ListOrdered },
+    { id: "longterm", label: "📈 Long terme", icon: CalendarRange },
     { id: "dossier", label: "Dossier", icon: FileText },
     { id: "calc", label: "Calculateur", icon: Calculator },
     { id: "historique", label: "Historique", icon: HistoryIcon },
   ];
 
   return (
-    <div style={{ minHeight: "100vh", background: "#000000", color: TEXT, padding: "28px 18px 60px" }}>
+    <div style={{ minHeight: "100vh", background: "#000000", color: TEXT, padding: "20px 12px 48px", boxSizing: "border-box", overflowX: "hidden" }}>
       <style>{`
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
         .spin { animation: spin 0.8s linear infinite; }
       `}</style>
 
-      <div style={{ maxWidth: 480, margin: "0 auto" }}>
+      <div style={{ width: "100%", maxWidth: 560, margin: "0 auto", boxSizing: "border-box" }}>
         <div style={{ marginBottom: 20 }}>
           <div style={{ fontSize: 12, color: ACCENT, letterSpacing: 1.5, textTransform: "uppercase", fontWeight: 700, marginBottom: 4 }}>
             Discipline de trading
           </div>
-          <div style={{ fontSize: 24, fontWeight: 700 }}>Top 15 marchés &amp; calculateur</div>
+          <div style={{ fontSize: 24, fontWeight: 700 }}>Marchés &amp; investissement</div>
         </div>
 
-        <div style={{ display: "flex", gap: 4, marginBottom: 20, borderBottom: `1px solid ${LINE}`, paddingBottom: 4, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", gap: 2, marginBottom: 20, borderBottom: `1px solid ${LINE}`, paddingBottom: 4, overflowX: "auto", WebkitOverflowScrolling: "touch", scrollbarWidth: "none" }}>
           {tabs.map(({ id, label, icon: Icon }) => (
             <button
               key={id}
@@ -2122,6 +2389,8 @@ export default function TradingApp() {
                 fontWeight: tab === id ? 700 : 500,
                 fontSize: 13,
                 padding: "8px 10px",
+                flex: "0 0 auto",
+                whiteSpace: "nowrap",
                 borderBottom: tab === id ? `2px solid ${ACCENT}` : "2px solid transparent",
                 cursor: "pointer",
               }}
@@ -2138,6 +2407,14 @@ export default function TradingApp() {
               setTab("calc");
             }}
             onGoToHistorique={() => setTab("historique")}
+          />
+        )}
+        {tab === "longterm" && (
+          <LongTermInvestissement
+            onSendToCalculator={(prefill) => {
+              setPrefillCalc(prefill);
+              setTab("calc");
+            }}
           />
         )}
         {tab === "dossier" && <Dossier setTab={setTab} setPrefillCalc={setPrefillCalc} />}
