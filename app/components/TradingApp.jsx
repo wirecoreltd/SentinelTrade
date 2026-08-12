@@ -1428,9 +1428,11 @@ const LONG_TERM_WATCHLIST = [
 ];
 
 const LONG_TERM_HORIZONS = [
-  { key: "1m", label: "1 mois", days: 30 },
-  { key: "3m", label: "3 mois", days: 90 },
-  { key: "6m", label: "6 mois", days: 180 },
+  // Chaque horizon possède ses propres paramètres techniques et son levier
+  // par défaut. Le calculateur reçoit exactement les niveaux de l'horizon choisi.
+  { key: "1m", label: "1 mois", days: 30, fastEma: 10, slowEma: 20, atrMult: 1.8, maxLeverage: 2 },
+  { key: "3m", label: "3 mois", days: 90, fastEma: 20, slowEma: 50, atrMult: 2.2, maxLeverage: 1.5 },
+  { key: "6m", label: "6 mois", days: 180, fastEma: 50, slowEma: 100, atrMult: 2.8, maxLeverage: 1 },
 ];
 
 function clampNumber(value, min, max) {
@@ -1467,35 +1469,49 @@ async function runLongTermAnalysis(item) {
 
   const closes = history.map((h) => h.close);
   const current = price.price;
-  const ema20Series = calcEMA(closes, 20);
-  const ema50Series = calcEMA(closes, 50);
-  const ema20 = ema20Series[ema20Series.length - 1];
-  const ema50 = ema50Series[ema50Series.length - 1];
   const rsiSeries = calcRSI(closes, 14);
   const rsi = rsiSeries[rsiSeries.length - 1];
   const atrSeries = calcATR(history, 14);
   const atr = atrSeries[atrSeries.length - 1];
 
-  const returns = {
-    "1m": pctChangeFromHistory(history, 30),
-    "3m": pctChangeFromHistory(history, 90),
-    "6m": pctChangeFromHistory(history, 180),
-  };
-
   const horizonData = {};
   for (const horizon of LONG_TERM_HORIZONS) {
-    const momentum = returns[horizon.key] ?? 0;
-    const trendScore = ema20 != null && ema50 != null
-      ? current > ema20 && ema20 > ema50 ? 1 : current < ema20 && ema20 < ema50 ? -1 : 0
+    const cutoff = Date.now() - horizon.days * 24 * 60 * 60 * 1000;
+    const horizonHistory = history.filter((h) => new Date(h.date).getTime() >= cutoff);
+    const scopedHistory = horizonHistory.length >= horizon.slowEma ? horizonHistory : history;
+    const scopedCloses = scopedHistory.map((h) => h.close);
+
+    // Tous les indicateurs et niveaux sont calculés sur la fenêtre sélectionnée.
+    const fastSeries = calcEMA(scopedCloses, horizon.fastEma);
+    const slowSeries = calcEMA(scopedCloses, horizon.slowEma);
+    const fastEma = fastSeries[fastSeries.length - 1];
+    const slowEma = slowSeries[slowSeries.length - 1];
+    const momentum = pctChangeFromHistory(history, horizon.days) ?? 0;
+    const range = rangeHighLow(history, horizon.days);
+
+    const trendScore = fastEma != null && slowEma != null
+      ? current > fastEma && fastEma > slowEma ? 1 : current < fastEma && fastEma < slowEma ? -1 : 0
       : 0;
     const rsiScore = rsi == null ? 0 : rsi >= 45 && rsi <= 68 ? 1 : rsi > 75 ? -1 : rsi < 30 ? -0.5 : 0;
-    const momentumScore = clampNumber(momentum / 20, -1.5, 1.5);
+    const momentumScore = clampNumber(momentum / (horizon.days === 30 ? 12 : horizon.days === 90 ? 25 : 40), -1.5, 1.5);
     const score = momentumScore * 0.55 + trendScore * 0.30 + rsiScore * 0.15;
     const label = score >= 0.65 ? "FAVORI" : score >= 0.15 ? "SURVEILLER" : "ATTENDRE";
-    const range = rangeHighLow(history, horizon.days);
-    const technicalResistance = range.high != null && range.high > current ? range.high : current * 1.10;
-    const technicalSupport = range.low != null && range.low < current ? range.low : current * 0.90;
-    const stop = Math.max(technicalSupport, current - Math.max(atr ?? current * 0.04, current * 0.04));
+
+    // TP/SL sont propres à l'horizon : ils ne sont jamais réutilisés d'un autre horizon.
+    const technicalResistance = range.high != null && range.high > current
+      ? range.high
+      : current * (1 + (horizon.days / 30) * 0.05);
+    const technicalSupport = range.low != null && range.low < current
+      ? range.low
+      : current * (1 - (horizon.days / 30) * 0.035);
+    const atrForHorizon = atr ?? current * 0.04;
+    const stopByAtr = current - atrForHorizon * horizon.atrMult;
+    const stop = Math.max(technicalSupport, stopByAtr);
+    const target = technicalResistance;
+    const riskPct = Math.max(0, ((current - stop) / current) * 100);
+    const rewardPct = Math.max(0, ((target - current) / current) * 100);
+    const riskReward = riskPct > 0 ? rewardPct / riskPct : null;
+
     horizonData[horizon.key] = {
       score,
       label,
@@ -1503,7 +1519,14 @@ async function runLongTermAnalysis(item) {
       support: technicalSupport,
       resistance: technicalResistance,
       stop,
-      target: technicalResistance,
+      target,
+      fastEma,
+      slowEma,
+      riskPct,
+      rewardPct,
+      riskReward,
+      leverage: horizon.maxLeverage,
+      days: horizon.days,
     };
   }
 
@@ -1513,8 +1536,6 @@ async function runLongTermAnalysis(item) {
     price: current,
     change24h: price.change24h,
     image: null,
-    ema20,
-    ema50,
     rsi,
     atr,
     horizons: horizonData,
@@ -1603,7 +1624,7 @@ function LongTermInvestissement({ onSendToCalculator }) {
           <span style={{ fontSize: 12, fontWeight: 700 }}>Horizon sélectionné : {selectedHorizon.label}</span>
         </div>
         <div style={{ fontSize: 11, color: MUTED, lineHeight: 1.5 }}>
-          Pour un investissement long terme, le calculateur reste disponible avec les mêmes champs : mise, levier, entrée, stop-loss et take-profit. Pour un placement sans levier, sélectionne x1 dans le calculateur.
+          Tous les paramètres envoyés au calculateur sont ceux de l’horizon choisi : prix d’entrée actuel, support, résistance, stop-loss, take-profit et levier recommandé. Le calcul est donc spécifique à 1 mois, 3 mois ou 6 mois.
         </div>
       </div>
 
@@ -1643,9 +1664,9 @@ function LongTermInvestissement({ onSendToCalculator }) {
 
               <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0,1fr))", gap: 7, marginTop: 11 }}>
                 <div style={{ background: NAVY, borderRadius: 8, padding: 8 }}><div style={{ fontSize: 10, color: MUTED }}>{selectedHorizon.label} historique</div><div style={{ fontSize: 13, fontWeight: 800, color: h.returnPct >= 0 ? POS : NEG }}>{h.returnPct >= 0 ? "+" : ""}{h.returnPct.toFixed(1)}%</div></div>
-                <div style={{ background: NAVY, borderRadius: 8, padding: 8 }}><div style={{ fontSize: 10, color: MUTED }}>Objectif technique</div><div style={{ fontSize: 13, fontWeight: 800, color: POS }}>${formatPrice(h.target)}</div></div>
-                <div style={{ background: NAVY, borderRadius: 8, padding: 8 }}><div style={{ fontSize: 10, color: MUTED }}>Stop indicatif</div><div style={{ fontSize: 13, fontWeight: 800, color: NEG }}>${formatPrice(h.stop)}</div></div>
-                <div style={{ background: NAVY, borderRadius: 8, padding: 8 }}><div style={{ fontSize: 10, color: MUTED }}>RSI / tendance</div><div style={{ fontSize: 12, fontWeight: 700 }}>{r.rsi != null ? r.rsi.toFixed(0) : "—"} · {r.price > r.ema20 && r.ema20 > r.ema50 ? "haussière" : r.price < r.ema20 && r.ema20 < r.ema50 ? "baissière" : "mixte"}</div></div>
+                <div style={{ background: NAVY, borderRadius: 8, padding: 8 }}><div style={{ fontSize: 10, color: MUTED }}>Objectif {selectedHorizon.label}</div><div style={{ fontSize: 13, fontWeight: 800, color: POS }}>${formatPrice(h.target)} <span style={{fontSize:10}}>({h.rewardPct.toFixed(1)}%)</span></div></div>
+                <div style={{ background: NAVY, borderRadius: 8, padding: 8 }}><div style={{ fontSize: 10, color: MUTED }}>Stop {selectedHorizon.label}</div><div style={{ fontSize: 13, fontWeight: 800, color: NEG }}>${formatPrice(h.stop)} <span style={{fontSize:10}}>({h.riskPct.toFixed(1)}%)</span></div></div>
+                <div style={{ background: NAVY, borderRadius: 8, padding: 8 }}><div style={{ fontSize: 10, color: MUTED }}>Levier / R:R</div><div style={{ fontSize: 12, fontWeight: 800 }}>x{h.leverage} · {h.riskReward != null ? h.riskReward.toFixed(2) : "—"}:1</div></div>
               </div>
 
               <button
@@ -1660,9 +1681,14 @@ function LongTermInvestissement({ onSendToCalculator }) {
                   symbol: r.label,
                   rawQuery: r.query,
                   verdict: h.label === "FAVORI" ? "haussier" : "mitigé",
-                  leverage: 1,
+                  leverage: h.leverage,
                   invested: 50,
                   longTermHorizon: horizon,
+                  horizonDays: h.days,
+                  horizonLabel: selectedHorizon.label,
+                  horizonRiskPct: h.riskPct,
+                  horizonRewardPct: h.rewardPct,
+                  horizonRiskReward: h.riskReward,
                 })}
                 style={{ width: "100%", marginTop: 10, padding: "10px 12px", borderRadius: 8, border: `1px solid ${ACCENT}`, background: "rgba(79,140,255,0.10)", color: ACCENT, fontSize: 12, fontWeight: 800, cursor: "pointer" }}
               >
@@ -2256,13 +2282,19 @@ function Calculateur({ prefill }) {
 
       {prefill?.symbol && (
         <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: 12, marginBottom: 14 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
             <div><div style={{ fontSize: 11, color: MUTED }}>Marché sélectionné</div><div style={{ fontSize: 16, fontWeight: 700 }}>{prefill.symbol}</div></div>
+            {prefill.longTermHorizon && <div style={{ padding: "5px 8px", borderRadius: 7, border: `1px solid ${ACCENT}`, color: ACCENT, fontSize: 10, fontWeight: 800, whiteSpace: "nowrap" }}>{prefill.horizonLabel || prefill.longTermHorizon}</div>}
             {prefill.verdict && <div style={{ fontSize: 12, fontWeight: 800, color: prefill.verdict === "haussier" ? POS : prefill.verdict === "baissier" ? NEG : MUTED, textTransform: "uppercase" }}>{prefill.verdict}</div>}
           </div>
+          {prefill.longTermHorizon && (
+            <div style={{ marginTop: 8, paddingTop: 8, borderTop: `1px solid ${LINE}`, fontSize: 11, color: MUTED, lineHeight: 1.5 }}>
+              ⏱️ <strong style={{ color: TEXT }}>Horizon calculé :</strong> {prefill.horizonLabel || prefill.longTermHorizon} ({prefill.horizonDays || "—"} jours). Tous les niveaux et le levier ci-dessous proviennent de cet horizon.
+            </div>
+          )}
           {autoLocked && (
             <div style={{ fontSize: 11, color: MUTED, marginTop: 6, display: "flex", alignItems: "center", gap: 4 }}>
-              <Lock size={11} color={MUTED} /> Valeurs issues du moteur d'analyse et verrouillées — seul le montant à investir reste modifiable.
+              <Lock size={11} color={MUTED} /> Valeurs issues du moteur d'analyse et verrouillées — seul le montant à investir reste modifiable. Le levier est celui recommandé pour l'horizon sélectionné.
             </div>
           )}
         </div>
