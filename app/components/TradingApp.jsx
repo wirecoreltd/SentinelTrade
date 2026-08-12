@@ -13,6 +13,7 @@ import {
   Minus,
   Send,
   ListOrdered,
+  Lock,
 } from "lucide-react";
 
 // ---------- Thème ----------
@@ -25,6 +26,26 @@ const LINE = "#232C3D";
 const POS = "#3DD68C";
 const NEG = "#FF6767";
 const AMBER = "#FCD34D"; // amber-300
+const LOCKED_BG = "#10151F";
+
+// ---------- Formatage des prix ----------
+// Décimales adaptatives selon l'ordre de grandeur : un prix fixe à 2
+// décimales écrase le mouvement réel sur les actifs sous $1 (JPY/USD,
+// DOGE, etc.) où tout se joue à la 4e/5e décimale.
+function formatPrice(value) {
+  if (value == null || !Number.isFinite(value)) return "—";
+  const abs = Math.abs(value);
+  let decimals;
+  if (abs === 0) decimals = 2;
+  else if (abs < 0.01) decimals = 6;
+  else if (abs < 1) decimals = 4;
+  else if (abs < 10) decimals = 3;
+  else decimals = 2;
+  return value.toLocaleString(undefined, {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  });
+}
 
 // ---------- Helper: extrait un message d'erreur exploitable d'une réponse Alpha Vantage ----------
 // Alpha Vantage renvoie l'erreur / le message de quota sous des clés différentes
@@ -32,6 +53,24 @@ const AMBER = "#FCD34D"; // amber-300
 // quota ou fonction premium), "Error Message" (paramètre/symbole invalide).
 function alphaVantageErrorMessage(data) {
   return data?.Note || data?.Information || data?.["Error Message"] || null;
+}
+
+// ---------- Cache mémoire avec expiration ----------
+// Le quota Alpha Vantage (25 req/jour gratuit) s'épuise très vite dès qu'on
+// navigue entre onglets ou qu'on relance une analyse. On met en cache
+// chaque résultat pendant 15 minutes : dans cette fenêtre, on réutilise la
+// donnée déjà récupérée au lieu de renvoyer un appel réseau.
+const apiCache = new Map();
+const CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
+
+async function cachedFetch(key, fetcher) {
+  const cached = apiCache.get(key);
+  if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
+    return cached.data;
+  }
+  const data = await fetcher();
+  apiCache.set(key, { data, ts: Date.now() });
+  return data;
 }
 
 // ---------- Métaux précieux (or, argent) ----------
@@ -87,6 +126,10 @@ async function fetchCoinGeckoHistory(id, days) {
   }).catch(() => {
     throw new Error("Historique crypto indisponible");
   });
+  // CoinGecko market_chart ne fournit qu'un prix de clôture par jour, pas de
+  // vraies bougies OHLC. On approxime high = low = close : l'ATR/ADX calculés
+  // dessus sont donc une volatilité clôture-à-clôture, pas une vraie amplitude
+  // intrajournalière. C'est signalé dans le raisonnement du Dossier.
   return data.prices.map(([ts, price]) => ({ date: ts, close: price, high: price, low: price }));
 }
 
@@ -101,75 +144,79 @@ async function fetchCoinGeckoTop(n = 10) {
     throw new Error("Scanner indisponible");
   });
 }
-  // CoinGecko market_chart ne fournit qu'un prix de clôture par jour, pas de
-  // vraies bougies OHLC. On approxime high = low = close : l'ATR/ADX calculés
-  // dessus sont donc une volatilité clôture-à-clôture, pas une vraie amplitude
-  // intrajournalière. C'est signalé dans le raisonnement du Dossier.
 
 async function fetchAlphaQuote(symbol) {
-  const res = await fetch(`/api/stock?symbol=${encodeURIComponent(symbol)}&kind=quote`);
-  const data = await res.json();
-  if (data.error) throw new Error(data.error);
-  const q = data["Global Quote"];
-  if (!q || !q["05. price"]) {
-    const reason = alphaVantageErrorMessage(data);
-    throw new Error(reason || "Symbole introuvable");
-  }
-  return {
-    price: parseFloat(q["05. price"]),
-    change24h: parseFloat(q["10. change percent"]),
-  };
+  return cachedFetch(`quote:${symbol}`, async () => {
+    const res = await fetch(`/api/stock?symbol=${encodeURIComponent(symbol)}&kind=quote`);
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    const q = data["Global Quote"];
+    if (!q || !q["05. price"]) {
+      const reason = alphaVantageErrorMessage(data);
+      throw new Error(reason || "Symbole introuvable");
+    }
+    return {
+      price: parseFloat(q["05. price"]),
+      change24h: parseFloat(q["10. change percent"]),
+    };
+  });
 }
 
 async function fetchAlphaHistory(symbol) {
-  const res = await fetch(`/api/stock?symbol=${encodeURIComponent(symbol)}&kind=history`);
-  const data = await res.json();
-  if (data.error) throw new Error(data.error);
-  const series = data["Time Series (Daily)"];
-  if (!series) {
-    const reason = alphaVantageErrorMessage(data);
-    throw new Error(reason || "Historique indisponible");
-  }
-  return Object.entries(series)
-    .map(([date, v]) => ({
-      date,
-      close: parseFloat(v["4. close"]),
-      high: parseFloat(v["2. high"]),
-      low: parseFloat(v["3. low"]),
-    }))
-    .sort((a, b) => new Date(a.date) - new Date(b.date));
+  return cachedFetch(`history:${symbol}`, async () => {
+    const res = await fetch(`/api/stock?symbol=${encodeURIComponent(symbol)}&kind=history`);
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    const series = data["Time Series (Daily)"];
+    if (!series) {
+      const reason = alphaVantageErrorMessage(data);
+      throw new Error(reason || "Historique indisponible");
+    }
+    return Object.entries(series)
+      .map(([date, v]) => ({
+        date,
+        close: parseFloat(v["4. close"]),
+        high: parseFloat(v["2. high"]),
+        low: parseFloat(v["3. low"]),
+      }))
+      .sort((a, b) => new Date(a.date) - new Date(b.date));
+  });
 }
 
 // Devises classiques uniquement (les métaux passent par fetchMetalPrice ci-dessus)
 async function fetchFxQuote(symbol) {
-  const res = await fetch(`/api/stock?symbol=${encodeURIComponent(symbol)}&kind=quote&market=fx`);
-  const data = await res.json();
-  if (data.error) throw new Error(data.error);
-  const q = data["Realtime Currency Exchange Rate"];
-  if (!q || !q["5. Exchange Rate"]) {
-    const reason = alphaVantageErrorMessage(data);
-    throw new Error(reason || "Devise introuvable (ex: EUR, GBP)");
-  }
-  return { price: parseFloat(q["5. Exchange Rate"]), change24h: null };
+  return cachedFetch(`fxquote:${symbol}`, async () => {
+    const res = await fetch(`/api/stock?symbol=${encodeURIComponent(symbol)}&kind=quote&market=fx`);
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    const q = data["Realtime Currency Exchange Rate"];
+    if (!q || !q["5. Exchange Rate"]) {
+      const reason = alphaVantageErrorMessage(data);
+      throw new Error(reason || "Devise introuvable (ex: EUR, GBP)");
+    }
+    return { price: parseFloat(q["5. Exchange Rate"]), change24h: null };
+  });
 }
 
 async function fetchFxHistory(symbol) {
-  const res = await fetch(`/api/stock?symbol=${encodeURIComponent(symbol)}&kind=history&market=fx`);
-  const data = await res.json();
-  if (data.error) throw new Error(data.error);
-  const series = data["Time Series FX (Daily)"];
-  if (!series) {
-    const reason = alphaVantageErrorMessage(data);
-    throw new Error(reason || "Historique indisponible");
-  }
-  return Object.entries(series)
-    .map(([date, v]) => ({
-      date,
-      close: parseFloat(v["4. close"]),
-      high: parseFloat(v["2. high"]),
-      low: parseFloat(v["3. low"]),
-    }))
-    .sort((a, b) => new Date(a.date) - new Date(b.date));
+  return cachedFetch(`fxhistory:${symbol}`, async () => {
+    const res = await fetch(`/api/stock?symbol=${encodeURIComponent(symbol)}&kind=history&market=fx`);
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    const series = data["Time Series FX (Daily)"];
+    if (!series) {
+      const reason = alphaVantageErrorMessage(data);
+      throw new Error(reason || "Historique indisponible");
+    }
+    return Object.entries(series)
+      .map(([date, v]) => ({
+        date,
+        close: parseFloat(v["4. close"]),
+        high: parseFloat(v["2. high"]),
+        low: parseFloat(v["3. low"]),
+      }))
+      .sort((a, b) => new Date(a.date) - new Date(b.date));
+  });
 }
 
 async function fetchNewsSentiment(query) {
@@ -422,19 +469,6 @@ function calcFibRetracement(structure) {
   };
 }
 
-// Ratio risque/récompense basé sur les mêmes stops ATR que ceux déjà
-// envoyés au calculateur (atrStop / atrStopShort).
-function calcRiskReward(verdict, currentPrice, atrStop, atrStopShort, support, resistance) {
-  const stop = verdict === "baissier" ? atrStopShort : atrStop;
-  const target = verdict === "baissier" ? support : resistance;
-  if (stop == null || target == null) return null;
-  const risk = Math.abs(currentPrice - stop);
-  const reward = Math.abs(target - currentPrice);
-  if (risk === 0) return null;
-  return { ratio: reward / risk, risk, reward, stop, target };
-}
-
-
 // Nuage d'Ichimoku. cloudTopAt(i)/cloudBottomAt(i) renvoient le nuage tel
 // qu'il serait affiché au jour i (projection standard de 26 périodes).
 function calcIchimoku(history) {
@@ -511,6 +545,64 @@ function detectMarketStructure(history, span = 2) {
   return { regime, bos, choch, support: lastLow.price, resistance: lastHigh.price };
 }
 
+// ---------- Niveaux de trade cohérents (stop / take-profit) ----------
+// Bug corrigé : le take-profit réutilisait la résistance/support de
+// structure même quand le prix l'avait déjà dépassée (ce qui arrive
+// précisément lors d'un BOS). Résultat : un signal "haussier" pouvait
+// afficher un prix de vente sous le prix d'achat. Ici, on ne garde le
+// niveau structurel comme cible que s'il est encore devant le prix ET
+// qu'il offre un ratio risque/récompense correct ; sinon on projette une
+// cible à PROJECTED_RR fois la distance du stop, ce qui garantit toujours
+// un take-profit du bon côté du prix avec un R:R raisonnable.
+const MIN_STRUCTURAL_RR = 1.2;
+const PROJECTED_RR = 2;
+
+function computeTradeLevels({ verdict, currentPrice, support, resistance, atr }) {
+  if (atr == null) return { stop: null, target: null, riskReward: null, projected: false };
+
+  if (verdict === "haussier") {
+    if (support == null) return { stop: null, target: null, riskReward: null, projected: false };
+    const stop = support - 1.2 * atr;
+    const risk = currentPrice - stop;
+    if (risk <= 0) return { stop, target: null, riskReward: null, projected: false };
+
+    let target = null;
+    let projected = false;
+    if (resistance != null && resistance > currentPrice) {
+      const rr = (resistance - currentPrice) / risk;
+      if (rr >= MIN_STRUCTURAL_RR) target = resistance;
+    }
+    if (target == null) {
+      target = currentPrice + PROJECTED_RR * risk;
+      projected = true;
+    }
+    const riskReward = (target - currentPrice) / risk;
+    return { stop, target, riskReward, projected };
+  }
+
+  if (verdict === "baissier") {
+    if (resistance == null) return { stop: null, target: null, riskReward: null, projected: false };
+    const stop = resistance + 1.2 * atr;
+    const risk = stop - currentPrice;
+    if (risk <= 0) return { stop, target: null, riskReward: null, projected: false };
+
+    let target = null;
+    let projected = false;
+    if (support != null && support < currentPrice) {
+      const rr = (currentPrice - support) / risk;
+      if (rr >= MIN_STRUCTURAL_RR) target = support;
+    }
+    if (target == null) {
+      target = currentPrice - PROJECTED_RR * risk;
+      projected = true;
+    }
+    const riskReward = (currentPrice - target) / risk;
+    return { stop, target, riskReward, projected };
+  }
+
+  return { stop: null, target: null, riskReward: null, projected: false };
+}
+
 // ---------- Moteur d'analyse partagé (Dossier + Top 15) ----------
 // Pour les devises classiques, on ne fait plus qu'UN SEUL appel Alpha Vantage
 // (l'historique) au lieu de deux : le dernier cours de la série sert de prix
@@ -556,34 +648,60 @@ async function runMarketAnalysis(type, query) {
 
   // Pas assez d'historique (or/argent, ou série trop courte) pour une
   // analyse technique fiable : verdict basé uniquement sur les actualités.
- if (!history || history.length < 60) {
+  if (!history || history.length < 60) {
     let verdict = "mitigé";
     if (news?.label === "positif") verdict = "haussier";
     else if (news?.label === "négatif") verdict = "baissier";
 
     // Pas assez (ou pas du tout) d'historique pour un vrai calcul
-    // technique. On dérive quand même des niveaux exploitables pour que
-    // l'auto-remplissage (Top 15 + Calculateur) fonctionne partout :
-    // - or/argent : bande à ±1.5% du prix courant (heuristique, pas un
-    //   vrai support/résistance)
-    // - historique court mais présent : min/max de la période disponible
+    // technique. Si le verdict est directionnel, on dérive quand même des
+    // niveaux exploitables pour que l'auto-remplissage (Top 15 +
+    // Calculateur) fonctionne. Si le verdict est neutre (mitigé), on
+    // n'affiche aucun niveau : pas de signal, pas de trade proposé.
     let support = null, resistance = null, atrStop = null, atrStopShort = null;
+    let takeProfit = null, riskReward = null;
     let levelsNote;
 
-    if (metal) {
+    if (verdict === "mitigé") {
+      levelsNote = metal
+        ? "Historique de prix indisponible gratuitement pour l'or/l'argent — actualités neutres, aucun signal directionnel ni niveau de trade proposé"
+        : history
+        ? "Historique insuffisant pour une analyse technique complète (moins de 60 jours) — actualités neutres, aucun signal directionnel"
+        : "Historique de prix indisponible — actualités neutres, aucun signal directionnel";
+    } else if (metal) {
+      // Or/argent : bande à ±1.5% du prix courant (heuristique, pas un
+      // vrai support/résistance faute d'historique gratuit).
       const pct = 0.015;
-      support = price.price * (1 - pct);
-      resistance = price.price * (1 + pct);
-      atrStop = support * 0.995;
-      atrStopShort = resistance * 1.005;
+      const bandLow = price.price * (1 - pct);
+      const bandHigh = price.price * (1 + pct);
+      if (verdict === "haussier") {
+        support = bandLow;
+        atrStop = support * 0.995;
+        resistance = bandHigh;
+        takeProfit = resistance;
+        riskReward = (takeProfit - price.price) / (price.price - atrStop);
+      } else {
+        resistance = bandHigh;
+        atrStopShort = resistance * 1.005;
+        support = bandLow;
+        takeProfit = support;
+        riskReward = (price.price - takeProfit) / (atrStopShort - price.price);
+      }
       levelsNote = "Historique de prix indisponible gratuitement pour l'or/l'argent — niveaux approximés à ±1,5% du prix courant (pas un calcul technique réel), verdict basé sur les actualités";
     } else if (history && history.length >= 2) {
       const sr = supportResistance(history);
       support = sr.support;
       resistance = sr.resistance;
       const range = resistance - support;
-      atrStop = support - range * 0.1;
-      atrStopShort = resistance + range * 0.1;
+      if (verdict === "haussier" && range > 0) {
+        atrStop = support - range * 0.1;
+        takeProfit = resistance;
+        riskReward = (takeProfit - price.price) / (price.price - atrStop);
+      } else if (verdict === "baissier" && range > 0) {
+        atrStopShort = resistance + range * 0.1;
+        takeProfit = support;
+        riskReward = (price.price - takeProfit) / (atrStopShort - price.price);
+      }
       levelsNote = "Historique insuffisant pour une analyse technique complète (moins de 60 jours) — niveaux basés sur le min/max de la période disponible, verdict basé sur les actualités";
     } else {
       levelsNote = "Historique de prix indisponible — verdict basé uniquement sur les actualités";
@@ -609,6 +727,8 @@ async function runMarketAnalysis(type, query) {
       news,
       atrStop,
       atrStopShort,
+      takeProfit,
+      riskReward,
       sentinel: null,
     };
   }
@@ -680,10 +800,24 @@ async function runMarketAnalysis(type, query) {
 
   const support = structure.support;
   const resistance = structure.resistance;
-  // Stop-loss basé sur la volatilité réelle (ATR) plutôt qu'un pourcentage
-  // fixe : plus l'actif est volatil, plus le stop est éloigné de l'entrée.
-  const atrStop = support != null && atr != null ? support - 1.2 * atr : null;
-  const atrStopShort = resistance != null && atr != null ? resistance + 1.2 * atr : null;
+
+  const tradeLevels = computeTradeLevels({ verdict, currentPrice, support, resistance, atr });
+
+  // Garde-fou risque/récompense : même si le vote technique est
+  // directionnel, on ne propose pas de trade si le ratio risque/récompense
+  // est défavorable (ou si aucune cible fiable n'a pu être calculée). Le
+  // signal est alors neutralisé en "mitigé", comme pour le garde-fou RSI.
+  let rrDowngraded = false;
+  if ((verdict === "haussier" || verdict === "baissier") && (tradeLevels.riskReward == null || tradeLevels.riskReward < 1)) {
+    verdict = "mitigé";
+    rrDowngraded = true;
+  }
+
+  const showTrade = verdict === "haussier" || verdict === "baissier";
+  const atrStop = showTrade && verdict === "haussier" ? tradeLevels.stop : null;
+  const atrStopShort = showTrade && verdict === "baissier" ? tradeLevels.stop : null;
+  const takeProfit = showTrade ? tradeLevels.target : null;
+  const riskReward = showTrade ? tradeLevels.riskReward : null;
 
   const trendLabel =
     ema20 != null && ema50 != null
@@ -702,11 +836,14 @@ async function runMarketAnalysis(type, query) {
       ? `Prix ${currentPrice > cloudTop ? "au-dessus" : currentPrice < cloudBottom ? "en-dessous" : "dans"} le nuage Ichimoku`
       : null,
     `Structure de marché : ${structure.regime}${structure.bos ? " — cassure de continuation (BOS)" : ""}${structure.choch ? " — signal de retournement (CHOCH)" : ""}`,
-    support != null && `Support (swing low) : $${support.toFixed(2)} — Résistance (swing high) : $${resistance.toFixed(2)}`,
+    support != null && resistance != null && `Support (swing low) : $${formatPrice(support)} — Résistance (swing high) : $${formatPrice(resistance)}`,
     rsi != null &&
       `RSI(14) : ${rsi.toFixed(0)}${rsi > 75 ? " — suracheté, prudence" : rsi < 25 ? " — survendu, prudence" : ""}`,
     atr != null &&
-      `ATR(14) : $${atr.toFixed(2)} (volatilité${type === "crypto" ? ", approximée en clôture-à-clôture faute d'OHLC gratuit" : ""})`,
+      `ATR(14) : $${formatPrice(atr)} (volatilité${type === "crypto" ? ", approximée en clôture-à-clôture faute d'OHLC gratuit" : ""})`,
+    showTrade &&
+      `Stop-loss : $${formatPrice(tradeLevels.stop)} — Take-profit : $${formatPrice(tradeLevels.target)} (R:R ${riskReward.toFixed(2)}:1${tradeLevels.projected ? ", cible projetée car le niveau structurel est déjà dépassé" : ""})`,
+    rrDowngraded && "Signal neutralisé (WAIT) : ratio risque/récompense insuffisant sur ce setup",
     news
       ? `Actualités : ton ${news.label} sur ${news.articleCount} articles récents`
       : newsError
@@ -728,7 +865,16 @@ async function runMarketAnalysis(type, query) {
 
   const pivots = calcPivotPoints(history);
   const fibRetracement = calcFibRetracement(structure);
-  const riskReward = calcRiskReward(verdict, currentPrice, atrStop, atrStopShort, support, resistance);
+
+  const riskRewardForSentinel = showTrade
+    ? {
+        ratio: riskReward,
+        risk: Math.abs(currentPrice - tradeLevels.stop),
+        reward: Math.abs(tradeLevels.target - currentPrice),
+        stop: tradeLevels.stop,
+        target: tradeLevels.target,
+      }
+    : null;
 
   // Sentinel attend `structure.direction` OU `structure.regime` selon les
   // fonctions internes du moteur (incohérence dans sentinel-engine.js) :
@@ -753,7 +899,7 @@ async function runMarketAnalysis(type, query) {
     meanReversion,
     pivots,
     fibRetracement,
-    riskReward,
+    riskReward: riskRewardForSentinel,
     verdict,
   };
 
@@ -770,6 +916,8 @@ async function runMarketAnalysis(type, query) {
     news,
     atrStop,
     atrStopShort,
+    takeProfit,
+    riskReward,
     sentinel, // { score, bias, setup, status, breakdown, reasons, warnings }
   };
 }
@@ -869,7 +1017,7 @@ function Scanner({ onPick }) {
               </div>
             </div>
             <div style={{ textAlign: "right" }}>
-              <div style={{ fontWeight: 700, fontSize: 14 }}>${c.current_price.toLocaleString()}</div>
+              <div style={{ fontWeight: 700, fontSize: 14 }}>${formatPrice(c.current_price)}</div>
               <div style={{ fontSize: 12, color: c.price_change_percentage_24h >= 0 ? POS : NEG }}>
                 {c.price_change_percentage_24h >= 0 ? "+" : ""}
                 {c.price_change_percentage_24h?.toFixed(2)}%
@@ -1003,18 +1151,18 @@ function PrixNiveaux({ prefill, setTab, setPrefillCalc }) {
         <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 16 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 12 }}>
             <div style={{ fontSize: 15, fontWeight: 700 }}>{result.symbol}</div>
-            <div style={{ fontSize: 22, fontWeight: 700 }}>${result.price.toLocaleString()}</div>
+            <div style={{ fontSize: 22, fontWeight: 700 }}>${formatPrice(result.price)}</div>
           </div>
 
           {result.support != null ? (
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
               <div style={{ background: NAVY, borderRadius: 8, padding: 10 }}>
                 <div style={{ fontSize: 11, color: MUTED }}>Support (30j)</div>
-                <div style={{ fontSize: 15, fontWeight: 700, color: POS }}>${result.support.toFixed(2)}</div>
+                <div style={{ fontSize: 15, fontWeight: 700, color: POS }}>${formatPrice(result.support)}</div>
               </div>
               <div style={{ background: NAVY, borderRadius: 8, padding: 10 }}>
                 <div style={{ fontSize: 11, color: MUTED }}>Résistance (30j)</div>
-                <div style={{ fontSize: 15, fontWeight: 700, color: NEG }}>${result.resistance.toFixed(2)}</div>
+                <div style={{ fontSize: 15, fontWeight: 700, color: NEG }}>${formatPrice(result.resistance)}</div>
               </div>
             </div>
           ) : (
@@ -1029,7 +1177,7 @@ function PrixNiveaux({ prefill, setTab, setPrefillCalc }) {
                 entry: result.price,
                 stop: result.support != null ? result.support : "",
                 takeProfit: result.resistance != null ? result.resistance : "",
-                assetType: type === "crypto" ? "crypto" : type === "fx" && isMetal(q) ? "matieres" : type === "fx" ? "forex" : "actions",
+                assetType: type === "crypto" ? "crypto" : type === "fx" && isMetal(query) ? "matieres" : type === "fx" ? "forex" : "actions",
                 direction: "long",
                 symbol: result.symbol,
               });
@@ -1158,16 +1306,37 @@ function Dossier({ setTab, setPrefillCalc }) {
           </div>
 
           {dossier.sentinel && (
-            <div style={{ marginTop: 10, borderTop: `1px solid ${LINE}`, paddingTop: 10 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-                <span style={{ fontSize: 12, color: MUTED }}>Sentinel Score</span>
-                <span style={{ fontSize: 13, fontWeight: 700 }}>
+            <div style={{ marginBottom: 14, borderBottom: `1px solid ${LINE}`, paddingBottom: 14 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                <span style={{ fontSize: 12, color: MUTED, textTransform: "uppercase", letterSpacing: 0.5 }}>
+                  Sentinel Score
+                </span>
+                <span
+                  style={{
+                    fontSize: 13,
+                    fontWeight: 800,
+                    color:
+                      dossier.sentinel.status === "VALID" ? POS
+                      : dossier.sentinel.status === "WAIT" ? MUTED
+                      : NEG,
+                  }}
+                >
                   {dossier.sentinel.score}/100 — {dossier.sentinel.status}
                 </span>
               </div>
+
+              {dossier.sentinel.warnings.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                  {dossier.sentinel.warnings.slice(0, 3).map((w, i) => (
+                    <div key={i} style={{ fontSize: 11, color: NEG }}>
+                      ⚠️ {w}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
-                    
+
           <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 14 }}>
             {dossier.reasoning.map((line, i) => (
               <div key={i} style={{ fontSize: 13, color: MUTED, display: "flex", gap: 6 }}>
@@ -1191,14 +1360,8 @@ function Dossier({ setTab, setPrefillCalc }) {
             onClick={() => {
               setPrefillCalc({
                 entry: dossier.price,
-                stop:
-                  dossier.verdict === "baissier"
-                    ? dossier.atrStopShort ?? dossier.resistance
-                    : dossier.atrStop ?? dossier.support,
-                takeProfit:
-                  dossier.verdict === "baissier"
-                    ? dossier.support
-                    : dossier.resistance,
+                stop: dossier.verdict === "baissier" ? dossier.atrStopShort : dossier.atrStop,
+                takeProfit: dossier.takeProfit,
                 assetType: type === "crypto" ? "crypto" : type === "fx" && isMetal(query) ? "matieres" : type === "fx" ? "forex" : "actions",
                 direction: dossier.verdict === "baissier" ? "short" : "long",
                 symbol: dossier.symbol,
@@ -1352,12 +1515,11 @@ function TopMarkets({ onSendToCalculator }) {
     setLoading(false);
   }, []);
 
-  // Scan automatique dès l'ouverture de l'onglet (ce composant n'est monté
-  // que quand tab === "top15", donc ça se relance à chaque fois qu'on
-  // revient sur l'onglet).
-  useEffect(() => {
-    runScan();
-  }, [runScan]);
+  // Plus de scan automatique à l'ouverture : chaque visite de l'onglet
+  // consommait 5 requêtes Alpha Vantage (quota de 25/jour en gratuit), donc
+  // 4-5 allers-retours suffisaient à tout épuiser. Le scan démarre
+  // uniquement sur clic ; le cache (15 min) limite les doublons si on
+  // relance sans avoir vraiment besoin de données plus fraîches.
 
   return (
     <div>
@@ -1374,25 +1536,25 @@ function TopMarkets({ onSendToCalculator }) {
         </div>
       )}
 
-      {!loading && hasRun && (
+      {!loading && (
         <button
           onClick={runScan}
           style={{
             display: "flex",
             alignItems: "center",
             gap: 6,
-            background: "none",
-            border: `1px solid ${LINE}`,
+            background: hasRun ? "none" : "rgba(79,140,255,0.12)",
+            border: `1px solid ${hasRun ? LINE : ACCENT}`,
             borderRadius: 20,
-            padding: "6px 12px",
-            color: MUTED,
+            padding: "8px 14px",
+            color: hasRun ? MUTED : ACCENT,
             fontSize: 12,
             fontWeight: 600,
             cursor: "pointer",
             marginBottom: 16,
           }}
         >
-          <ListOrdered size={13} /> Actualiser
+          <ListOrdered size={13} /> {hasRun ? "Actualiser" : "Lancer le scan"}
         </button>
       )}
 
@@ -1416,16 +1578,15 @@ function TopMarkets({ onSendToCalculator }) {
             }
 
             const action = ACTION_MAP[r.verdict] || ACTION_MAP["mitigé"];
-            const hasLevels = r.support != null && r.resistance != null;
             const isBullish = r.verdict === "haussier";
             const isBearish = r.verdict === "baissier";
-            // L'entrée automatique est le prix courant. Support/résistance servent
-            // aux niveaux de sortie et de protection.
+            // L'entrée automatique est le prix courant. Le take-profit
+            // vient du moteur (cible corrigée, cohérente avec le sens du
+            // signal) ; le stop-loss selon la direction.
             const buyPrice = r.price;
-            const sellPrice = hasLevels ? (isBullish ? r.resistance : r.support) : null;
-            const stopPrice = isBearish
-              ? r.atrStopShort ?? r.resistance
-              : r.atrStop ?? r.support;
+            const sellPrice = r.takeProfit;
+            const stopPrice = isBearish ? r.atrStopShort : r.atrStop;
+            const hasLevels = sellPrice != null && stopPrice != null;
 
             return (
               <button
@@ -1457,7 +1618,7 @@ function TopMarkets({ onSendToCalculator }) {
                     {ticker && (
                       <div style={{ fontSize: 11, color: MUTED, textTransform: "uppercase" }}>{ticker}</div>
                     )}
-                    <div style={{ fontSize: 13, fontWeight: 600, marginTop: 4 }}>${r.price.toLocaleString()}</div>
+                    <div style={{ fontSize: 13, fontWeight: 600, marginTop: 4 }}>${formatPrice(r.price)}</div>
                   </div>
                   <div
                     style={{
@@ -1478,11 +1639,11 @@ function TopMarkets({ onSendToCalculator }) {
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
                     <div style={{ background: NAVY, borderRadius: 8, padding: 8 }}>
                       <div style={{ fontSize: 10, color: MUTED }}>Prix d'achat</div>
-                      <div style={{ fontSize: 13, fontWeight: 700, color: POS }}>${buyPrice.toFixed(2)}</div>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: POS }}>${formatPrice(buyPrice)}</div>
                     </div>
                     <div style={{ background: NAVY, borderRadius: 8, padding: 8 }}>
                       <div style={{ fontSize: 10, color: MUTED }}>Prix de vente</div>
-                      <div style={{ fontSize: 13, fontWeight: 700, color: NEG }}>${sellPrice.toFixed(2)}</div>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: NEG }}>${formatPrice(sellPrice)}</div>
                     </div>
                   </div>
                 )}
@@ -1506,17 +1667,43 @@ const LEVERAGE_PRESETS = {
 
 // Défini en dehors de Calculateur : sinon React recrée ce composant à
 // chaque frappe et l'input perd le focus après chaque caractère.
+// Style volontairement très différent entre verrouillé (mode auto : la
+// valeur vient du moteur, non modifiable) et modifiable (mode manuel, ou
+// le champ "Montant à investir" qui reste éditable même en mode auto) :
+// gris + icône cadenas d'un côté, bordure ambre de l'autre.
 function CalcField({ label, value, onChange, placeholder, readOnly = false }) {
   return (
     <div style={{ marginBottom: 12 }}>
-      <div style={{ fontSize: 12, color: MUTED, marginBottom: 4 }}>{label}</div>
+      <div
+        style={{
+          fontSize: 12,
+          color: readOnly ? MUTED : AMBER,
+          marginBottom: 4,
+          fontWeight: readOnly ? 400 : 700,
+          display: "flex",
+          alignItems: "center",
+          gap: 4,
+        }}
+      >
+        {label}
+        {readOnly && <Lock size={11} color={MUTED} />}
+      </div>
       <input
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
         readOnly={readOnly}
         inputMode="decimal"
-        style={{ width: "100%", background: NAVY, border: `1px solid ${LINE}`, borderRadius: 8, padding: "10px 12px", color: TEXT, fontSize: 14 }}
+        style={{
+          width: "100%",
+          background: readOnly ? LOCKED_BG : NAVY,
+          border: `1px solid ${readOnly ? LINE : AMBER}`,
+          borderRadius: 8,
+          padding: "10px 12px",
+          color: readOnly ? MUTED : TEXT,
+          fontSize: 14,
+          cursor: readOnly ? "not-allowed" : "text",
+        }}
       />
     </div>
   );
@@ -1573,8 +1760,8 @@ function Calculateur({ prefill }) {
   return (
     <div>
       <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
-       <button onClick={() => setMode("auto")} style={{ flex: 1, padding: "9px 10px", borderRadius: 8, border: `1px solid ${mode === "auto" ? AMBER : LINE}`, background: mode === "auto" ? "rgba(252,211,77,0.12)" : "transparent", color: mode === "auto" ? AMBER : MUTED, fontWeight: 700, fontSize: 13, cursor: "pointer" }}>⚡ Automatique — Signal</button>
-        <button onClick={() => setMode("manual")} style={{ flex: 1, padding: "9px 10px", borderRadius: 8, border: `1px solid ${mode === "manual" ? AMBER : LINE}`, background: mode === "manual" ? "rgba(252,211,77,0.12)" : "transparent", color: mode === "manual" ? AMBER : MUTED, fontWeight: 700, fontSize: 13, cursor: "pointer" }}>✎ Manuel</button> 
+        <button onClick={() => setMode("auto")} style={{ flex: 1, padding: "9px 10px", borderRadius: 8, border: `1px solid ${mode === "auto" ? AMBER : LINE}`, background: mode === "auto" ? "rgba(252,211,77,0.12)" : "transparent", color: mode === "auto" ? AMBER : MUTED, fontWeight: 700, fontSize: 13, cursor: "pointer" }}>⚡ Automatique — Signal</button>
+        <button onClick={() => setMode("manual")} style={{ flex: 1, padding: "9px 10px", borderRadius: 8, border: `1px solid ${mode === "manual" ? AMBER : LINE}`, background: mode === "manual" ? "rgba(252,211,77,0.12)" : "transparent", color: mode === "manual" ? AMBER : MUTED, fontWeight: 700, fontSize: 13, cursor: "pointer" }}>✎ Manuel</button>
       </div>
 
       {prefill?.symbol && (
@@ -1583,7 +1770,11 @@ function Calculateur({ prefill }) {
             <div><div style={{ fontSize: 11, color: MUTED }}>Marché sélectionné</div><div style={{ fontSize: 16, fontWeight: 700 }}>{prefill.symbol}</div></div>
             {prefill.verdict && <div style={{ fontSize: 12, fontWeight: 800, color: prefill.verdict === "haussier" ? POS : prefill.verdict === "baissier" ? NEG : MUTED, textTransform: "uppercase" }}>{prefill.verdict}</div>}
           </div>
-          {autoLocked && <div style={{ fontSize: 11, color: MUTED, marginTop: 6 }}>Valeurs issues du moteur d'analyse et verrouillées.</div>}
+          {autoLocked && (
+            <div style={{ fontSize: 11, color: MUTED, marginTop: 6, display: "flex", alignItems: "center", gap: 4 }}>
+              <Lock size={11} color={MUTED} /> Valeurs issues du moteur d'analyse et verrouillées — seul le montant à investir reste modifiable.
+            </div>
+          )}
         </div>
       )}
 
@@ -1594,7 +1785,7 @@ function Calculateur({ prefill }) {
         ))}
       </div>
 
-      {field("Montant à investir — ta mise / marge (€)", invested, setInvested, "ex: 50")}
+      {field("Montant à investir — ta mise / marge (€)", invested, setInvested, "ex: 50", false)}
       {field("Levier (x1 = sans levier, ex: Binance spot)", leverage, setLeverage, "ex: 2")}
       {field("Prix d'entrée", entry, setEntry, "ex: 4346.55")}
       {field("Stop-loss", stop, setStop, "ex: 4300.00")}
@@ -1605,9 +1796,9 @@ function Calculateur({ prefill }) {
           <div style={{ marginBottom: 12, paddingBottom: 12, borderBottom: `1px solid ${LINE}` }}>
             <div style={{ fontSize: 12, color: ACCENT, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 6 }}>À saisir sur Capital.com / Binance</div>
             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}><span style={{ fontSize: 13, color: MUTED }}>Taille</span><span style={{ fontSize: 16, fontWeight: 700, color: ACCENT }}>{quantity.toFixed(6)}</span></div>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}><span style={{ fontSize: 13, color: MUTED }}>Stop loss — Niveau de prix</span><span style={{ fontSize: 14, fontWeight: 700 }}>{s}</span></div>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}><span style={{ fontSize: 11, color: MUTED }}>Distance</span><span style={{ fontSize: 12, color: MUTED }}>{distance.toFixed(2)} ({distancePct.toFixed(2)}%)</span></div>
-            {tp > 0 && <><div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}><span style={{ fontSize: 13, color: MUTED }}>Take-profit — Niveau de prix</span><span style={{ fontSize: 14, fontWeight: 700 }}>{tp}</span></div><div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: 11, color: MUTED }}>Distance</span><span style={{ fontSize: 12, color: MUTED }}>{gainDistance.toFixed(2)} ({gainDistancePct.toFixed(2)}%)</span></div></>}
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}><span style={{ fontSize: 13, color: MUTED }}>Stop loss — Niveau de prix</span><span style={{ fontSize: 14, fontWeight: 700 }}>{formatPrice(s)}</span></div>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}><span style={{ fontSize: 11, color: MUTED }}>Distance</span><span style={{ fontSize: 12, color: MUTED }}>{formatPrice(distance)} ({distancePct.toFixed(2)}%)</span></div>
+            {tp > 0 && <><div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}><span style={{ fontSize: 13, color: MUTED }}>Take-profit — Niveau de prix</span><span style={{ fontSize: 14, fontWeight: 700 }}>{formatPrice(tp)}</span></div><div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: 11, color: MUTED }}>Distance</span><span style={{ fontSize: 12, color: MUTED }}>{formatPrice(gainDistance)} ({gainDistancePct.toFixed(2)}%)</span></div></>}
           </div>
           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}><span style={{ fontSize: 13, color: MUTED }}>Taille totale de la position</span><span style={{ fontSize: 14, fontWeight: 700 }}>{positionValue.toFixed(2)} €</span></div>
           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}><span style={{ fontSize: 13, color: MUTED }}>Marge requise</span><span style={{ fontSize: 14, fontWeight: 700 }}>{inv.toFixed(2)} €</span></div>
