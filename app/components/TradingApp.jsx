@@ -809,8 +809,15 @@ async function runMarketAnalysis(type, query) {
   if (verdict === "haussier" && rsi != null && rsi > 75) verdict = "mitigé";
   if (verdict === "baissier" && rsi != null && rsi < 25) verdict = "mitigé";
 
-  const support = structure.support;
-  const resistance = structure.resistance;
+  let support = structure.support;
+  let resistance = structure.resistance;
+  let structureFallback = false;
+  if (support == null || resistance == null) {
+    const sr = supportResistance(history);
+    support = support ?? sr.support;
+    resistance = resistance ?? sr.resistance;
+    structureFallback = true;
+  }
 
   // Direction utilisée pour calculer les niveaux d'achat/vente : celle du
   // verdict quand il est directionnel, sinon un biais par défaut basé sur
@@ -858,6 +865,8 @@ async function runMarketAnalysis(type, query) {
       : null,
     `Structure de marché : ${structure.regime}${structure.bos ? " — cassure de continuation (BOS)" : ""}${structure.choch ? " — signal de retournement (CHOCH)" : ""}`,
     support != null && resistance != null && `Support (swing low) : $${formatPrice(support)} — Résistance (swing high) : $${formatPrice(resistance)}`,
+    structureFallback &&
+      "Structure de marché indéterminée (pas assez de swing points) — niveaux approximés sur le min/max de la période",
     rsi != null &&
       `RSI(14) : ${rsi.toFixed(0)}${rsi > 75 ? " — suracheté, prudence" : rsi < 25 ? " — survendu, prudence" : ""}`,
     atr != null &&
