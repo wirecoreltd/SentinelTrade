@@ -616,31 +616,7 @@ function computeTradeLevels({ verdict, currentPrice, support, resistance, atr })
     return { stop, target, riskReward, projected };
   }
 
-  return { stop: null, target: null, riskReward: null, projected: false };
-}
-
-  if (verdict === "baissier") {
-    if (resistance == null) return { stop: null, target: null, riskReward: null, projected: false };
-    const stop = resistance + 1.2 * atr;
-    const risk = stop - currentPrice;
-    if (risk <= 0) return { stop, target: null, riskReward: null, projected: false };
-
-    let target = null;
-    let projected = false;
-    if (support != null && support < currentPrice) {
-      const rr = (currentPrice - support) / risk;
-      if (rr >= MIN_STRUCTURAL_RR) target = support;
-    }
-    if (target == null) {
-      target = currentPrice - PROJECTED_RR * risk;
-      projected = true;
-    }
-    const riskReward = (currentPrice - target) / risk;
-    return { stop, target, riskReward, projected };
-  }
-
-  return { stop: null, target: null, riskReward: null, projected: false };
-}
+  return { stop: null, target: null, riskReward: null, projected: false };  
 
 // ---------- Moteur d'analyse partagé (Dossier + Top 15) ----------
 // Pour les devises classiques, on ne fait plus qu'UN SEUL appel Alpha Vantage
