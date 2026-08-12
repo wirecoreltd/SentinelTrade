@@ -614,6 +614,16 @@ function computeTradeLevels({ verdict, currentPrice, support, resistance, atr })
       risk = stop - currentPrice;
       projected = true;
     }
+
+    let target = null;
+    if (!projected && support != null && support < currentPrice) {
+      const rr = (currentPrice - support) / risk;
+      if (rr >= MIN_STRUCTURAL_RR) target = support;
+    }
+    if (target == null) {
+      target = currentPrice - PROJECTED_RR * risk;
+      projected = true;
+    }
     const riskReward = (currentPrice - target) / risk;
     return { stop, target, riskReward, projected };
   }
