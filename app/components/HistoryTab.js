@@ -1,254 +1,339 @@
 "use client";
 
 // ============================================================================
-// Historique des trades "pris" (marqués manuellement depuis le Calculateur)
-// + garde-fous de discipline (surexposition sur un même actif, limite de
-// risque cumulé par jour, limite du nombre de trades par jour).
+// Onglet "Historique" — affiche les trades marqués comme pris depuis le
+// Calculateur, avec un résumé du jour (nb de trades, risque cumulé) et la
+// possibilité de clôturer (gagné/perdu/clôturé) ou supprimer une entrée.
 //
-// Stockage : localStorage, donc propre à cet appareil/navigateur. Pas de
-// backend — si tu utilises l'appli sur plusieurs appareils, l'historique
-// ne sera pas partagé entre eux.
+// La logique de stockage/garde-fous vit dans ../lib/tradeHistory.js — ce
+// fichier ne fait que l'affichage.
 // ============================================================================
 
-const HISTORY_KEY = "trading-app:trade-history:v1";
-const SETTINGS_KEY = "trading-app:risk-settings:v1";
+import { useEffect, useMemo, useState } from "react";
+import { Trash2, TrendingUp, TrendingDown, CheckCircle2, XCircle, CircleDot } from "lucide-react";
+import { NAVY, PANEL, ACCENT, TEXT, MUTED, LINE, POS, NEG, AMBER } from "../lib/theme";
+import { formatPrice } from "../lib/format";
+import {
+  loadHistory,
+  loadSettings,
+  updateTradeStatus,
+  deleteTrade,
+  getTodayTrades,
+  todayOpenRisk,
+  toLocalDateKey,
+} from "../lib/tradeHistory";
 
-export const DEFAULT_SETTINGS = {
-  dailyRiskLimit: 100, // € — perte cumulée max acceptée sur les trades encore ouverts pris aujourd'hui
-  maxTradesPerDay: 5, // nombre max de trades pris dans la journée, tous actifs confondus
-  maxTradesPerAsset: 2, // nombre max de trades pris sur le même actif + même sens dans la journée
+const STATUS_LABEL = {
+  ouvert: "Ouvert",
+  "gagné": "Gagné",
+  perdu: "Perdu",
+  "clôturé": "Clôturé",
 };
 
-function isBrowser() {
-  return typeof window !== "undefined";
-}
+const STATUS_COLOR = {
+  ouvert: ACCENT,
+  "gagné": POS,
+  perdu: NEG,
+  "clôturé": MUTED,
+};
 
-function safeParse(json, fallback) {
-  try {
-    const v = JSON.parse(json);
-    return v ?? fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-export function toLocalDateKey(d = new Date()) {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
-
-// ---------- Lecture / écriture brute ----------
-
-export function loadHistory() {
-  if (!isBrowser()) return [];
-  return safeParse(window.localStorage.getItem(HISTORY_KEY), []);
-}
-
-function saveHistory(list) {
-  if (!isBrowser()) return;
-  window.localStorage.setItem(HISTORY_KEY, JSON.stringify(list));
-}
-
-export function loadSettings() {
-  if (!isBrowser()) return DEFAULT_SETTINGS;
-  return { ...DEFAULT_SETTINGS, ...safeParse(window.localStorage.getItem(SETTINGS_KEY), {}) };
-}
-
-export function saveSettings(settings) {
-  if (!isBrowser()) return;
-  window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
-}
-
-// ---------- Ajout / mise à jour d'un trade ----------
-
-// `trade` attendu : { symbol, assetType, direction ("long"|"short"),
-// entry, stop, takeProfit, invested, leverage, quantity, positionValue,
-// riskAmount, potentialGain, riskPct, verdict }
-export function addTrade(trade) {
-  const list = loadHistory();
-  const now = new Date();
-  const entry = {
-    id: `${now.getTime()}-${Math.random().toString(36).slice(2, 8)}`,
-    createdAt: now.toISOString(),
-    dateKey: toLocalDateKey(now),
-    status: "ouvert", // "ouvert" | "gagné" | "perdu" | "clôturé"
-    closedAt: null,
-    realizedPnL: null,
-    ...trade,
-  };
-  saveHistory([entry, ...list]);
-  return entry;
-}
-
-export function updateTradeStatus(id, status, realizedPnL = null) {
-  const next = loadHistory().map((t) =>
-    t.id === id
-      ? {
-          ...t,
-          status,
-          closedAt: new Date().toISOString(),
-          realizedPnL: realizedPnL != null ? realizedPnL : t.realizedPnL,
-        }
-      : t
+function StatusBadge({ status }) {
+  const color = STATUS_COLOR[status] || MUTED;
+  return (
+    <span
+      style={{
+        fontSize: 11,
+        fontWeight: 700,
+        color,
+        background: `${color}22`,
+        padding: "3px 9px",
+        borderRadius: 20,
+        textTransform: "uppercase",
+        letterSpacing: 0.4,
+        whiteSpace: "nowrap",
+      }}
+    >
+      {STATUS_LABEL[status] || status}
+    </span>
   );
-  saveHistory(next);
-  return next;
 }
 
-export function deleteTrade(id) {
-  const next = loadHistory().filter((t) => t.id !== id);
-  saveHistory(next);
-  return next;
-}
-
-// ---------- Lecture / stats ----------
-
-export function getTodayTrades(history, dateKey = toLocalDateKey()) {
-  return history.filter((t) => t.dateKey === dateKey);
-}
-
-export function getOpenTrades(history) {
-  return history.filter((t) => t.status === "ouvert");
-}
-
-// Risque total (somme des pertes potentielles si stop touché) des trades
-// encore ouverts pris aujourd'hui.
-export function todayOpenRisk(history, dateKey = toLocalDateKey()) {
-  return getTodayTrades(history, dateKey)
-    .filter((t) => t.status === "ouvert")
-    .reduce((sum, t) => sum + (t.riskAmount || 0), 0);
-}
-
-export function exposureByType(history) {
-  const map = {};
-  getOpenTrades(history).forEach((t) => {
-    map[t.assetType] = (map[t.assetType] || 0) + 1;
+function formatDate(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString("fr-FR", {
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
   });
-  return map;
 }
 
-export function getOpenTradesForSymbol(history, symbol) {
-  return getOpenTrades(history).filter((t) => t.symbol === symbol);
+function TradeCard({ trade, onClose, onDelete }) {
+  const isLong = trade.direction !== "short";
+  const DirIcon = isLong ? TrendingUp : TrendingDown;
+  const dirColor = isLong ? POS : NEG;
+  const isOpen = trade.status === "ouvert";
+
+  return (
+    <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 14 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <div
+            style={{
+              width: 26,
+              height: 26,
+              borderRadius: 8,
+              background: `${dirColor}1a`,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              flexShrink: 0,
+            }}
+          >
+            <DirIcon size={14} color={dirColor} />
+          </div>
+          <div>
+            <div style={{ fontSize: 14, fontWeight: 700 }}>{trade.symbol}</div>
+            <div style={{ fontSize: 11, color: MUTED }}>
+              {isLong ? "Long" : "Short"} · {formatDate(trade.createdAt)}
+            </div>
+          </div>
+        </div>
+        <StatusBadge status={trade.status} />
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 10 }}>
+        <div style={{ background: NAVY, borderRadius: 8, padding: 8 }}>
+          <div style={{ fontSize: 10, color: MUTED }}>Entrée</div>
+          <div style={{ fontSize: 12, fontWeight: 700 }}>{formatPrice(trade.entry)}</div>
+        </div>
+        <div style={{ background: NAVY, borderRadius: 8, padding: 8 }}>
+          <div style={{ fontSize: 10, color: MUTED }}>Stop</div>
+          <div style={{ fontSize: 12, fontWeight: 700, color: NEG }}>{formatPrice(trade.stop)}</div>
+        </div>
+        <div style={{ background: NAVY, borderRadius: 8, padding: 8 }}>
+          <div style={{ fontSize: 10, color: MUTED }}>TP</div>
+          <div style={{ fontSize: 12, fontWeight: 700, color: POS }}>
+            {trade.takeProfit != null ? formatPrice(trade.takeProfit) : "—"}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: isOpen ? 10 : 0 }}>
+        <span style={{ fontSize: 11, color: MUTED }}>
+          Mise {trade.invested?.toFixed(2)} € · Risque{" "}
+          <span style={{ color: NEG, fontWeight: 700 }}>{trade.riskAmount != null ? `${trade.riskAmount.toFixed(2)} €` : "—"}</span>
+        </span>
+        {trade.realizedPnL != null && (
+          <span style={{ fontSize: 12, fontWeight: 700, color: trade.realizedPnL >= 0 ? POS : NEG }}>
+            {trade.realizedPnL >= 0 ? "+" : ""}
+            {trade.realizedPnL.toFixed(2)} €
+          </span>
+        )}
+      </div>
+
+      {isOpen ? (
+        <div style={{ display: "flex", gap: 6 }}>
+          <button
+            onClick={() => onClose(trade.id, "gagné")}
+            style={{
+              flex: 1,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 4,
+              background: "rgba(61,214,140,0.12)",
+              border: `1px solid ${POS}`,
+              color: POS,
+              borderRadius: 8,
+              padding: "7px 0",
+              fontSize: 11,
+              fontWeight: 700,
+              cursor: "pointer",
+            }}
+          >
+            <CheckCircle2 size={12} /> Gagné
+          </button>
+          <button
+            onClick={() => onClose(trade.id, "perdu")}
+            style={{
+              flex: 1,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 4,
+              background: "rgba(255,103,103,0.12)",
+              border: `1px solid ${NEG}`,
+              color: NEG,
+              borderRadius: 8,
+              padding: "7px 0",
+              fontSize: 11,
+              fontWeight: 700,
+              cursor: "pointer",
+            }}
+          >
+            <XCircle size={12} /> Perdu
+          </button>
+          <button
+            onClick={() => onClose(trade.id, "clôturé")}
+            style={{
+              flex: 1,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 4,
+              background: "transparent",
+              border: `1px solid ${LINE}`,
+              color: MUTED,
+              borderRadius: 8,
+              padding: "7px 0",
+              fontSize: 11,
+              fontWeight: 700,
+              cursor: "pointer",
+            }}
+          >
+            <CircleDot size={12} /> Clôturé
+          </button>
+          <button
+            onClick={() => onDelete(trade.id)}
+            title="Supprimer"
+            style={{
+              width: 32,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              background: "transparent",
+              border: `1px solid ${LINE}`,
+              color: MUTED,
+              borderRadius: 8,
+              cursor: "pointer",
+            }}
+          >
+            <Trash2 size={12} />
+          </button>
+        </div>
+      ) : (
+        <div style={{ display: "flex", justifyContent: "flex-end" }}>
+          <button
+            onClick={() => onDelete(trade.id)}
+            title="Supprimer"
+            style={{
+              width: 32,
+              height: 28,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              background: "transparent",
+              border: `1px solid ${LINE}`,
+              color: MUTED,
+              borderRadius: 8,
+              cursor: "pointer",
+            }}
+          >
+            <Trash2 size={12} />
+          </button>
+        </div>
+      )}
+    </div>
+  );
 }
 
-// ---------- Avis sur une position déjà ouverte ----------
-// Compare chaque trade encore ouvert sur cet actif à l'état actuel du
-// marché (prix courant + verdict frais retourné par runMarketAnalysis) et
-// produit un avis en langage clair. Volontairement formulé au conditionnel
-// ("envisage de", "vaut la peine de") : ce ne sont pas des ordres, juste une
-// lecture des faits — la décision finale reste à toi.
-// `market` attendu : { symbol, price, verdict }  (un résultat de runMarketAnalysis)
-// `openTrades` : trades ouverts (status "ouvert") pour ce même symbole
-export function buildPositionAdvisory(market, openTrades) {
-  if (!openTrades || openTrades.length === 0) return null;
-  const current = market.price;
-  const freshVerdict = market.verdict;
+export default function HistoryTab() {
+  const [history, setHistory] = useState([]);
+  const [settings, setSettings] = useState(null);
+  const [filter, setFilter] = useState("tous"); // "tous" | "ouvert" | "clos"
 
-  const trades = openTrades.map((t) => {
-    const isLong = t.direction !== "short";
-    const stopHit = t.stop != null && (isLong ? current <= t.stop : current >= t.stop);
-    const targetHit = t.takeProfit != null && (isLong ? current >= t.takeProfit : current <= t.takeProfit);
-    const pnlPct = t.entry ? (isLong ? ((current - t.entry) / t.entry) * 100 : ((t.entry - current) / t.entry) * 100) : null;
+  useEffect(() => {
+    setHistory(loadHistory());
+    setSettings(loadSettings());
+  }, []);
 
-    let toTargetPct = null;
-    if (t.takeProfit != null && t.entry != null) {
-      const totalDist = Math.abs(t.takeProfit - t.entry);
-      const doneDist = isLong ? current - t.entry : t.entry - current;
-      toTargetPct = totalDist > 0 ? (doneDist / totalDist) * 100 : null;
-    }
+  const handleClose = (id, status) => {
+    const next = updateTradeStatus(id, status);
+    setHistory(next);
+  };
 
-    const verdictFlipped = (isLong && freshVerdict === "baissier") || (!isLong && freshVerdict === "haussier");
-    const verdictConfirmed = (isLong && freshVerdict === "haussier") || (!isLong && freshVerdict === "baissier");
+  const handleDelete = (id) => {
+    const next = deleteTrade(id);
+    setHistory(next);
+  };
 
-    let advice;
-    if (stopHit) {
-      advice =
-        "Le prix a atteint ou dépassé ton stop-loss — si le stop a été exécuté chez ton broker, ce trade devrait déjà être clôturé. Vérifie sur Capital.com/Binance et mets à jour son statut dans l'historique.";
-    } else if (targetHit) {
-      advice =
-        "Le prix a atteint ou dépassé ton take-profit — ça vaut la peine d'envisager de sécuriser le gain (clôture totale ou partielle) plutôt que de laisser courir sans plan.";
-    } else if (verdictFlipped) {
-      advice =
-        "Le signal technique s'est retourné dans le sens opposé à ta position depuis ta prise — plutôt que d'ajouter, envisage un stop resserré ou une clôture partielle.";
-    } else if (verdictConfirmed && pnlPct != null && pnlPct > 0) {
-      advice =
-        "Le signal reste dans le même sens et la position est en gain — augmenter la mise ou le levier est envisageable si tu veux plus d'exposition, en gardant à l'esprit que ça reste le même actif, donc pas de diversification.";
-    } else if (pnlPct != null && pnlPct < 0) {
-      advice =
-        "La position est en perte latente mais le signal n'a pas basculé contre toi — pas de signal technique de sortie pour l'instant ; ajouter maintenant reviendrait à moyenner à la baisse, à faire seulement si c'était ton plan de départ.";
-    } else {
-      advice = "Pas de mouvement significatif ni de changement de signal depuis la prise de position.";
-    }
+  const todayKey = toLocalDateKey();
+  const todayTrades = useMemo(() => getTodayTrades(history, todayKey), [history, todayKey]);
+  const openRiskToday = useMemo(() => todayOpenRisk(history, todayKey), [history, todayKey]);
 
-    return {
-      id: t.id,
-      direction: t.direction,
-      entry: t.entry,
-      stop: t.stop,
-      takeProfit: t.takeProfit,
-      createdAt: t.createdAt,
-      verdictAtEntry: t.verdict,
-      pnlPct,
-      toTargetPct,
-      stopHit,
-      targetHit,
-      advice,
-    };
-  });
+  const filtered = useMemo(() => {
+    if (filter === "ouvert") return history.filter((t) => t.status === "ouvert");
+    if (filter === "clos") return history.filter((t) => t.status !== "ouvert");
+    return history;
+  }, [history, filter]);
 
-  return { symbol: market.symbol, currentPrice: current, freshVerdict, trades };
-}
+  return (
+    <div>
+      <div style={{ fontSize: 13, color: MUTED, marginBottom: 14 }}>
+        Trades marqués comme pris depuis le Calculateur. Stocké uniquement sur cet appareil.
+      </div>
 
-// ---------- Garde-fous ----------
-// Renvoie un tableau de messages d'avertissement (vide = rien à signaler)
-// pour un trade candidat, sans jamais bloquer : c'est à toi de décider si
-// tu confirmes quand même.
-export function checkGuidance(candidate, { history, settings } = {}) {
-  const h = history ?? loadHistory();
-  const s = settings ?? loadSettings();
-  const warnings = [];
-  const dateKey = toLocalDateKey();
-  const today = getTodayTrades(h, dateKey);
+      {settings && (
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 16 }}>
+          <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: 12 }}>
+            <div style={{ fontSize: 10, color: MUTED, textTransform: "uppercase", marginBottom: 4 }}>
+              Trades aujourd'hui
+            </div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: todayTrades.length >= settings.maxTradesPerDay ? NEG : TEXT }}>
+              {todayTrades.length} <span style={{ fontSize: 12, color: MUTED, fontWeight: 400 }}>/ {settings.maxTradesPerDay}</span>
+            </div>
+          </div>
+          <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: 12 }}>
+            <div style={{ fontSize: 10, color: MUTED, textTransform: "uppercase", marginBottom: 4 }}>
+              Risque ouvert aujourd'hui
+            </div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: openRiskToday >= settings.dailyRiskLimit ? NEG : TEXT }}>
+              {openRiskToday.toFixed(2)} € <span style={{ fontSize: 12, color: MUTED, fontWeight: 400 }}>/ {settings.dailyRiskLimit} €</span>
+            </div>
+          </div>
+        </div>
+      )}
 
-  // Surexposition sur le même actif + même sens
-  const sameAssetCount = today.filter(
-    (t) => t.symbol === candidate.symbol && t.direction === candidate.direction
-  ).length;
-  if (sameAssetCount >= s.maxTradesPerAsset) {
-    warnings.push(
-      `Tu as déjà pris ${sameAssetCount} trade(s) ${candidate.direction === "short" ? "short" : "long"} sur ${candidate.symbol} aujourd'hui (limite : ${s.maxTradesPerAsset}).`
-    );
-  }
+      <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
+        {[
+          { id: "tous", label: "Tous" },
+          { id: "ouvert", label: "Ouverts" },
+          { id: "clos", label: "Clos" },
+        ].map((f) => (
+          <button
+            key={f.id}
+            onClick={() => setFilter(f.id)}
+            style={{
+              padding: "6px 12px",
+              borderRadius: 20,
+              border: `1px solid ${filter === f.id ? ACCENT : LINE}`,
+              background: filter === f.id ? "rgba(79,140,255,0.12)" : "transparent",
+              color: filter === f.id ? ACCENT : MUTED,
+              fontSize: 12,
+              fontWeight: 600,
+              cursor: "pointer",
+            }}
+          >
+            {f.label}
+          </button>
+        ))}
+      </div>
 
-  // Nombre total de trades aujourd'hui
-  if (today.length >= s.maxTradesPerDay) {
-    warnings.push(
-      `Tu as déjà pris ${today.length} trade(s) aujourd'hui (limite : ${s.maxTradesPerDay}). Un de plus peut relever de l'overtrading.`
-    );
-  }
-
-  // Risque cumulé (trades encore ouverts aujourd'hui) + ce nouveau trade
-  const openRisk = todayOpenRisk(h, dateKey);
-  const candidateRisk = candidate.riskAmount || 0;
-  const projectedRisk = openRisk + candidateRisk;
-  if (projectedRisk > s.dailyRiskLimit) {
-    warnings.push(
-      `Risque cumulé aujourd'hui : ${openRisk.toFixed(2)} € déjà engagés + ${candidateRisk.toFixed(2)} € sur ce trade = ${projectedRisk.toFixed(2)} €, au-delà de ta limite de ${s.dailyRiskLimit} €.`
-    );
-  }
-
-  // Corrélation crypto : plusieurs positions crypto ouvertes en même temps
-  // ne sont pas vraiment une diversification (elles bougent souvent ensemble).
-  if (candidate.assetType === "crypto") {
-    const openCrypto = getOpenTrades(h).filter((t) => t.assetType === "crypto").length;
-    if (openCrypto >= 3) {
-      warnings.push(
-        `${openCrypto} position(s) crypto déjà ouverte(s) — ce nouveau trade crypto ajoute de la corrélation plutôt que de la diversification.`
-      );
-    }
-  }
-
-  return warnings;
+      {filtered.length === 0 ? (
+        <div style={{ fontSize: 13, color: MUTED, textAlign: "center", padding: "30px 0" }}>
+          Aucun trade {filter === "ouvert" ? "ouvert" : filter === "clos" ? "clos" : "enregistré"} pour l'instant.
+          Marque un trade comme pris depuis le Calculateur pour le voir apparaître ici.
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {filtered.map((trade) => (
+            <TradeCard key={trade.id} trade={trade} onClose={handleClose} onDelete={handleDelete} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
