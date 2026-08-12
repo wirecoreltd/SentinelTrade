@@ -590,21 +590,17 @@ function computeTradeLevels({ verdict, currentPrice, support, resistance, atr })
     }
     const riskReward = (target - currentPrice) / risk;
     return { stop, target, riskReward, projected };
-  }
+  } 
 
   if (verdict === "baissier") {
     if (resistance == null) return { stop: null, target: null, riskReward: null, projected: false };
-    let stop = resistance + 1.2 * atr;
-    let risk = stop - currentPrice;
-    let projected = false;
-    if (risk <= 0) {
-      stop = currentPrice + ATR_FALLBACK_STOP_MULT * atr;
-      risk = stop - currentPrice;
-      projected = true;
-    }
+    const stop = resistance + 1.2 * atr;
+    const risk = stop - currentPrice;
+    if (risk <= 0) return { stop, target: null, riskReward: null, projected: false };
 
     let target = null;
-    if (!projected && support != null && support < currentPrice) {
+    let projected = false;
+    if (support != null && support < currentPrice) {
       const rr = (currentPrice - support) / risk;
       if (rr >= MIN_STRUCTURAL_RR) target = support;
     }
@@ -616,7 +612,8 @@ function computeTradeLevels({ verdict, currentPrice, support, resistance, atr })
     return { stop, target, riskReward, projected };
   }
 
-  return { stop: null, target: null, riskReward: null, projected: false };  
+  return { stop: null, target: null, riskReward: null, projected: false };
+}
 
 // ---------- Moteur d'analyse partagé (Dossier + Top 15) ----------
 // Pour les devises classiques, on ne fait plus qu'UN SEUL appel Alpha Vantage
