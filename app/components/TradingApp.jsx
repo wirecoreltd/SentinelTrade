@@ -12,52 +12,19 @@ import {
   Send,
   ListOrdered,
   Lock,
+  History as HistoryIcon,
 } from "lucide-react";
-
-// ---------- Thème ----------
-const NAVY = "#0E1420";
-const PANEL = "#161D2B";
-const ACCENT = "#4F8CFF";
-const TEXT = "#EEF1F6";
-const MUTED = "#8A93A6";
-const LINE = "#232C3D";
-const POS = "#3DD68C";
-const NEG = "#FF6767";
-const AMBER = "#FCD34D"; // amber-300
-const LOCKED_BG = "#10151F";
-
-// ---------- Formatage des prix ----------
-// Décimales adaptatives selon l'ordre de grandeur : un prix fixe à 2
-// décimales écrase le mouvement réel sur les actifs sous $1 (JPY/USD,
-// DOGE, etc.) où tout se joue à la 4e/5e décimale.
-function formatPrice(value) {
-  if (value == null || !Number.isFinite(value)) return "—";
-  const abs = Math.abs(value);
-  let decimals;
-  if (abs === 0) decimals = 2;
-  else if (abs < 0.01) decimals = 6;
-  else if (abs < 1) decimals = 4;
-  else if (abs < 10) decimals = 3;
-  else decimals = 2;
-  return value.toLocaleString(undefined, {
-    minimumFractionDigits: decimals,
-    maximumFractionDigits: decimals,
-  });
-}
+import { NAVY, PANEL, ACCENT, TEXT, MUTED, LINE, POS, NEG, AMBER, LOCKED_BG } from "../lib/theme";
+import { formatPrice } from "../lib/format";
+import { addTrade, checkGuidance } from "../lib/tradeHistory";
+import HistoryTab from "../components/HistoryTab";
 
 // ---------- Helper: extrait un message d'erreur exploitable d'une réponse Alpha Vantage ----------
-// Alpha Vantage renvoie l'erreur / le message de quota sous des clés différentes
-// selon le cas : "Note" (ancien format quota), "Information" (nouveau format,
-// quota ou fonction premium), "Error Message" (paramètre/symbole invalide).
 function alphaVantageErrorMessage(data) {
   return data?.Note || data?.Information || data?.["Error Message"] || null;
 }
 
 // ---------- Cache mémoire avec expiration ----------
-// Le quota Alpha Vantage (25 req/jour gratuit) s'épuise très vite dès qu'on
-// navigue entre onglets ou qu'on relance une analyse. On met en cache
-// chaque résultat pendant 15 minutes : dans cette fenêtre, on réutilise la
-// donnée déjà récupérée au lieu de renvoyer un appel réseau.
 const apiCache = new Map();
 const CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
 
@@ -71,13 +38,6 @@ async function cachedFetch(key, fetcher) {
   return data;
 }
 
-// ---------- Métaux précieux (or, argent) ----------
-// Alpha Vantage renvoie "Invalid API call" sur CURRENCY_EXCHANGE_RATE / FX_DAILY
-// pour XAU et XAG : ces symboles ne sont pas supportés sur le plan gratuit.
-// On les route donc vers gold-api.com : gratuit, sans clé API, CORS activé,
-// appelable directement depuis le navigateur. Limite : leur endpoint
-// d'historique nécessite une clé (10 req/h en gratuit), donc on affiche le
-// prix en temps réel mais pas de support/résistance pour ces deux actifs.
 const METAL_SYMBOLS = ["XAU", "XAG"];
 function isMetal(symbol) {
   return METAL_SYMBOLS.includes(symbol.toUpperCase());
@@ -91,11 +51,6 @@ async function fetchMetalPrice(symbol) {
   return { price: data.price, change24h: null };
 }
 
-// ---------- Helpers API ----------
-// Toutes les requêtes CoinGecko passent par le proxy interne /api/coingecko
-// (route.js) : ça évite les erreurs CORS que CoinGecko renvoie parfois côté
-// navigateur en cas de rate-limit, et ça permet d'utiliser la clé API côté
-// serveur (COINGECKO_KEY) pour un quota plus large.
 async function coingeckoProxy(path, params = {}) {
   const query = new URLSearchParams({ path, ...params }).toString();
   const res = await fetch(`/api/coingecko?${query}`);
@@ -124,10 +79,6 @@ async function fetchCoinGeckoHistory(id, days) {
   }).catch(() => {
     throw new Error("Historique crypto indisponible");
   });
-  // CoinGecko market_chart ne fournit qu'un prix de clôture par jour, pas de
-  // vraies bougies OHLC. On approxime high = low = close : l'ATR/ADX calculés
-  // dessus sont donc une volatilité clôture-à-clôture, pas une vraie amplitude
-  // intrajournalière. C'est signalé dans le raisonnement du Dossier.
   return data.prices.map(([ts, price]) => ({ date: ts, close: price, high: price, low: price }));
 }
 
@@ -143,9 +94,6 @@ async function fetchCoinGeckoTop(n = 10) {
   });
 }
 
-// Logos + variation 24h pour un lot de cryptos en un seul appel groupé
-// (au lieu d'un appel par actif). Utilisé par le Top 15 pour afficher les
-// petits logos et les pourcentages de variation.
 async function fetchCoinGeckoMarketsByIds(ids) {
   if (!ids || ids.length === 0) return [];
   return coingeckoProxy("coins/markets", {
@@ -155,12 +103,6 @@ async function fetchCoinGeckoMarketsByIds(ids) {
   }).catch(() => []);
 }
 
-// ---------- Vraies bougies OHLC (pour le graphique du Calculateur) ----------
-// CoinGecko expose un endpoint /coins/{id}/ohlc dédié qui renvoie de
-// vraies bougies (open/high/low/close), contrairement à market_chart qui
-// n'a qu'un prix de clôture par jour. Granularité imposée par CoinGecko
-// selon la fenêtre demandée (ex: bougies 30-min sur 1 jour, journalières
-// au-delà de 30 jours) — on ne la choisit pas, on l'affiche telle quelle.
 async function fetchCoinGeckoOHLC(id, days) {
   const data = await coingeckoProxy(`coins/${id}/ohlc`, {
     vs_currency: "usd",
@@ -213,7 +155,6 @@ async function fetchAlphaHistory(symbol) {
   });
 }
 
-// Devises classiques uniquement (les métaux passent par fetchMetalPrice ci-dessus)
 async function fetchFxQuote(symbol) {
   return cachedFetch(`fxquote:${symbol}`, async () => {
     const res = await fetch(`/api/stock?symbol=${encodeURIComponent(symbol)}&kind=quote&market=fx`);
@@ -273,18 +214,10 @@ async function fetchNewsSentiment(query) {
   return { label, score, articleCount: articles.length, headlines: articles.slice(0, 3).map((a) => a.title) };
 }
 
-// ---------- Calculs ----------
 function supportResistance(history) {
   const closes = history.map((h) => h.close);
   return { support: Math.min(...closes), resistance: Math.max(...closes) };
 }
-
-// ---------- Analyse technique ----------
-// Socle volontairement restreint (plutôt que d'empiler tous les indicateurs
-// possibles) : EMA + ADX/DMI + Ichimoku + structure de marché pour la
-// direction, RSI comme filtre de prudence (pas un signal directionnel), ATR
-// pour dimensionner le stop-loss selon la volatilité réelle plutôt qu'un
-// pourcentage fixe.
 
 function calcEMA(values, period) {
   const k = 2 / (period + 1);
@@ -305,8 +238,6 @@ function calcTrueRange(history) {
   });
 }
 
-// ATR lissé façon Wilder (14 périodes par défaut). Tableau aligné sur
-// l'historique, null tant qu'il n'y a pas assez de données.
 function calcATR(history, period = 14) {
   const tr = calcTrueRange(history);
   const out = new Array(history.length).fill(null);
@@ -320,7 +251,6 @@ function calcATR(history, period = 14) {
   return out;
 }
 
-// DMI / ADX façon Wilder.
 function calcADX(history, period = 14) {
   const n = history.length;
   const plusDM = new Array(n).fill(0);
@@ -371,8 +301,6 @@ function calcADX(history, period = 14) {
   return { plusDI, minusDI, adx };
 }
 
-// RSI façon Wilder (14 périodes). Sert de garde-fou de prudence
-// (suracheté/survendu), pas de signal directionnel principal.
 function calcRSI(closes, period = 14) {
   const out = new Array(closes.length).fill(null);
   if (closes.length <= period) return out;
@@ -394,8 +322,6 @@ function calcRSI(closes, period = 14) {
   }
   return out;
 }
-
-// ---------- Indicateurs additionnels pour Sentinel Engine ----------
 
 function calcMACD(closes, fast = 12, slow = 26, signalPeriod = 9) {
   const emaFast = calcEMA(closes, fast);
@@ -419,8 +345,6 @@ function volatilityRegimeLabel(atr, atrAvg) {
   return ratio <= 1.3 ? "modérée" : "élevée";
 }
 
-// Cassure du niveau clé (support/résistance de structure) suivie d'un retour
-// à proximité de ce niveau (dans un rayon de 0.5 ATR) : signe de retest validé.
 function detectBreakoutRetest(history, structure, atr) {
   if (!structure || structure.resistance == null || structure.support == null || atr == null) {
     return { active: false };
@@ -440,7 +364,6 @@ function detectBreakoutRetest(history, structure, atr) {
   return { active: broke && nearLevel };
 }
 
-// Prix revenu proche de l'EMA20 sans que la structure ne se soit inversée.
 function detectPullback(currentPrice, ema20, structure) {
   if (ema20 == null || !structure) return { active: false };
   const distPct = (Math.abs(currentPrice - ema20) / ema20) * 100;
@@ -448,7 +371,6 @@ function detectPullback(currentPrice, ema20, structure) {
   return { active: inTrend && distPct <= 1.5 && !structure.choch };
 }
 
-// Prix étiré loin de sa moyenne (≥2 ATR) avec un RSI en zone extrême.
 function detectMeanReversion(currentPrice, ema20, atr, rsi) {
   if (ema20 == null || atr == null || rsi == null) return { active: false };
   const distanceInATR = Math.abs(currentPrice - ema20) / atr;
@@ -456,7 +378,6 @@ function detectMeanReversion(currentPrice, ema20, atr, rsi) {
   return { active: distanceInATR >= 2 && extreme };
 }
 
-// Points pivots classiques calculés sur la dernière période complète.
 function calcPivotPoints(history) {
   if (!history || history.length < 2) return null;
   const prev = history[history.length - 2];
@@ -471,7 +392,6 @@ function calcPivotPoints(history) {
   };
 }
 
-// Retracements Fibonacci entre le swing low et le swing high de structure.
 function calcFibRetracement(structure) {
   if (!structure || structure.support == null || structure.resistance == null) return null;
   const { support: low, resistance: high } = structure;
@@ -486,8 +406,6 @@ function calcFibRetracement(structure) {
   };
 }
 
-// Nuage d'Ichimoku. cloudTopAt(i)/cloudBottomAt(i) renvoient le nuage tel
-// qu'il serait affiché au jour i (projection standard de 26 périodes).
 function calcIchimoku(history) {
   const highs = history.map((h) => h.high);
   const lows = history.map((h) => h.low);
@@ -516,10 +434,6 @@ function calcIchimoku(history) {
   return { cloudTopAt, cloudBottomAt };
 }
 
-// Points de swing (fractale à 5 barres) pour détecter la structure de
-// marché : Higher High/Higher Low = haussier, Lower High/Lower Low =
-// baissier. BOS = cassure dans le sens de la tendance (continuation).
-// CHOCH = cassure du côté opposé (signal de retournement potentiel).
 function detectMarketStructure(history, span = 2) {
   const highs = history.map((h) => h.high);
   const lows = history.map((h) => h.low);
@@ -562,50 +476,13 @@ function detectMarketStructure(history, span = 2) {
   return { regime, bos, choch, support: lastLow.price, resistance: lastHigh.price };
 }
 
-// ---------- Niveaux de trade cohérents (stop / take-profit) ----------
-// Bug corrigé : le take-profit réutilisait la résistance/support de
-// structure même quand le prix l'avait déjà dépassée (ce qui arrive
-// précisément lors d'un BOS). Résultat : un signal "haussier" pouvait
-// afficher un prix de vente sous le prix d'achat. Ici, on ne garde le
-// niveau structurel comme cible que s'il est encore devant le prix ET
-// qu'il offre un ratio risque/récompense correct ; sinon on projette une
-// cible à PROJECTED_RR fois la distance du stop, ce qui garantit toujours
-// un take-profit du bon côté du prix avec un R:R raisonnable.
 const MIN_STRUCTURAL_RR = 1.2;
 const PROJECTED_RR = 2;
-
-// Distance de secours (en multiples d'ATR) utilisée pour le stop quand le
-// niveau structurel (support/résistance) donne un risque nul ou négatif —
-// typiquement quand le prix a déjà dépassé ce niveau dans le sens opposé à
-// la direction choisie pour les niveaux (ex: prix au-dessus de la
-// résistance alors qu'on calcule un stop "baissier"). Sans ce filet, la
-// fonction renvoyait target: null et l'actif restait WAIT sans aucun prix
-// affiché (cas vu sur Bitcoin / Dogecoin).
 const ATR_FALLBACK_STOP_MULT = 1.5;
-
-// Repli en pourcentage du prix quand l'ATR est indisponible (ex: Dogecoin,
-// dont le calcul ATR peut échouer selon la forme de son historique
-// CoinGecko en clôture-à-clôture). Sans ce filet, computeTradeLevels
-// renvoyait un objet entièrement vide dès la première ligne, avant même
-// d'atteindre les fallbacks internes déjà en place plus bas — l'actif
-// restait WAIT sans aucun prix affiché, contrairement à un stop ATR
-// classique qui reste au moins approximatif.
-// BUG CORRIGÉ : cette constante était commentée (donc `undefined`) alors
-// qu'elle est utilisée juste en dessous dans computeTradeLevels — dès que
-// `atr` valait `null`, le composant plantait avec une ReferenceError et
-// tout l'onglet (Dossier / Top 15 / Calculateur) s'arrêtait net. Dans les
-// chemins d'appel actuels `atr` n'est jamais `null` à cet endroit (on ne
-// rentre dans cette branche que si `history.length >= 60`, largement
-// suffisant pour l'ATR(14)), mais mieux vaut un filet de sécurité réel
-// qu'une variable fantôme si un futur changement (historique plus court,
-// nouvelle source de données...) réintroduit le cas.
 const PRICE_PCT_FALLBACK_STOP = 0.03; // 3% du prix courant
 const MIN_ATR_PCT_OF_PRICE = 0.008;
 
 function computeTradeLevels({ verdict, currentPrice, support, resistance, atr }) {
-  // atr peut être null (historique insuffisant pour Wilder-14, ou données
-  // trop plates) : on substitue un pseudo-ATR basé sur 3% du prix courant
-  // pour ne jamais renvoyer un résultat totalement vide.
   const rawEffectiveAtr = atr != null ? atr : currentPrice * PRICE_PCT_FALLBACK_STOP;
   const effectiveAtr = Math.max(rawEffectiveAtr, currentPrice * MIN_ATR_PCT_OF_PRICE);
 
@@ -615,9 +492,6 @@ function computeTradeLevels({ verdict, currentPrice, support, resistance, atr })
     let risk = currentPrice - stop;
     let projected = false;
     if (risk <= 0) {
-      // Niveau structurel invalide relativement au prix courant : on
-      // retombe sur un stop purement basé sur l'ATR (ou son repli en %),
-      // qui garantit toujours un risque positif.
       stop = currentPrice - ATR_FALLBACK_STOP_MULT * effectiveAtr;
       risk = currentPrice - stop;
       projected = true;
@@ -663,12 +537,6 @@ function computeTradeLevels({ verdict, currentPrice, support, resistance, atr })
   return { stop: null, target: null, riskReward: null, projected: false };
 }
 
-// ---------- Moteur d'analyse partagé (Dossier + Top 15) ----------
-// Pour les devises classiques, on ne fait plus qu'UN SEUL appel Alpha Vantage
-// (l'historique) au lieu de deux : le dernier cours de la série sert de prix
-// actuel. Ça divise par deux la consommation de quota (25 req/jour) pour
-// chaque analyse, ce qui est indispensable pour pouvoir scanner plusieurs
-// devises d'affilée dans le Top 15 sans épuiser le quota du jour.
 async function runMarketAnalysis(type, query) {
   let price, history;
   const metal = type === "fx" && isMetal(query);
@@ -682,7 +550,6 @@ async function runMarketAnalysis(type, query) {
   } else if (type === "fx") {
     const sym = query.toUpperCase();
     if (metal) {
-      // Or / argent : pas d'historique gratuit, donc pas d'analyse technique.
       price = await fetchMetalPrice(sym);
       history = null;
     } else {
@@ -698,10 +565,6 @@ async function runMarketAnalysis(type, query) {
     ]);
   }
 
-  // Variation 24h : on prend celle fournie directement par la source
-  // (CoinGecko / Alpha Vantage) quand elle existe ; sinon (devises, sans
-  // "10. change percent" côté FX) on la dérive de l'avant-dernière clôture
-  // de l'historique.
   let change24h = price.change24h;
   if (change24h == null && history && history.length >= 2) {
     const prevClose = history[history.length - 2].close;
@@ -717,16 +580,11 @@ async function runMarketAnalysis(type, query) {
     newsError = e.message;
   }
 
-  // Pas assez d'historique (or/argent, ou série trop courte) pour une
-  // analyse technique fiable : verdict basé uniquement sur les actualités.
   if (!history || history.length < 60) {
     let verdict = "mitigé";
     if (news?.label === "positif") verdict = "haussier";
     else if (news?.label === "négatif") verdict = "baissier";
 
-    // Direction utilisée pour calculer des niveaux d'achat/vente à
-    // afficher même quand le verdict est neutre (WAIT) — par défaut
-    // haussier faute d'autre signal directionnel disponible ici.
     const levelsDirection = verdict === "baissier" ? "baissier" : "haussier";
 
     let support = null, resistance = null, atrStop = null, atrStopShort = null;
@@ -734,8 +592,6 @@ async function runMarketAnalysis(type, query) {
     let levelsNote;
 
     if (metal) {
-      // Or/argent : bande à ±1.5% du prix courant (heuristique, pas un
-      // vrai support/résistance faute d'historique gratuit).
       const pct = 0.015;
       const bandLow = price.price * (1 - pct);
       const bandHigh = price.price * (1 + pct);
@@ -781,11 +637,6 @@ async function runMarketAnalysis(type, query) {
           : "Historique de prix indisponible — verdict basé uniquement sur les actualités";
     }
 
-    // Même garde-fou risque/récompense que la branche technique complète :
-    // sans lui, un actif comme l'or/l'argent (bande fixe ±1.5% / stop
-    // ±0.5% => R:R structurellement ~0.75:1 dans les deux sens) pouvait
-    // afficher un GO/AVOID basé uniquement sur les actualités, avec un
-    // ratio risque/récompense défavorable et aucun avertissement.
     let rrDowngraded = false;
     if ((verdict === "haussier" || verdict === "baissier") && (riskReward == null || riskReward < 1)) {
       verdict = "mitigé";
@@ -842,8 +693,6 @@ async function runMarketAnalysis(type, query) {
   const rsi = calcRSI(closes, 14)[lastIdx];
   const atr = calcATR(history, 14)[lastIdx];
 
-  // --- Vote multi-facteurs : chaque brique contribue 1 point (0.5 pour un
-  // BOS de confirmation) au camp haussier ou baissier. ---
   let bull = 0, bear = 0;
 
   if (ema20 != null && ema50 != null) {
@@ -868,8 +717,6 @@ async function runMarketAnalysis(type, query) {
     else bear += 0.5;
   }
   if (structure.choch) {
-    // Une cassure du côté opposé à la tendance en cours est un signal de
-    // retournement : elle vote contre le camp de la tendance affichée.
     if (structure.regime === "haussier") bear += 1;
     else bull += 1;
   }
@@ -881,9 +728,6 @@ async function runMarketAnalysis(type, query) {
   if (bull - bear >= 2) verdict = "haussier";
   else if (bear - bull >= 2) verdict = "baissier";
 
-  // RSI = garde-fou de prudence, pas un signal directionnel : un verdict
-  // haussier sur un actif suracheté (ou baissier sur un actif survendu) est
-  // ramené à "mitigé" pour éviter d'entrer trop tard sur le mouvement.
   if (verdict === "haussier" && rsi != null && rsi > 75) verdict = "mitigé";
   if (verdict === "baissier" && rsi != null && rsi < 25) verdict = "mitigé";
 
@@ -897,19 +741,11 @@ async function runMarketAnalysis(type, query) {
     structureFallback = true;
   }
 
-  // Direction utilisée pour calculer les niveaux d'achat/vente : celle du
-  // verdict quand il est directionnel, sinon un biais par défaut basé sur
-  // le vote technique (bull vs bear) — pour toujours pouvoir afficher un
-  // prix d'achat et un prix de vente, même sur un signal WAIT.
   const levelsDirection =
     verdict === "baissier" ? "baissier" : verdict === "haussier" ? "haussier" : bull >= bear ? "haussier" : "baissier";
 
   const tradeLevels = computeTradeLevels({ verdict: levelsDirection, currentPrice, support, resistance, atr });
 
-  // Garde-fou risque/récompense : même si le vote technique est
-  // directionnel, on ne propose pas de trade si le ratio risque/récompense
-  // est défavorable (ou si aucune cible fiable n'a pu être calculée). Le
-  // signal est alors neutralisé en "mitigé", comme pour le garde-fou RSI.
   let rrDowngraded = false;
   if ((verdict === "haussier" || verdict === "baissier") && (tradeLevels.riskReward == null || tradeLevels.riskReward < 1)) {
     verdict = "mitigé";
@@ -917,9 +753,6 @@ async function runMarketAnalysis(type, query) {
   }
 
   const showTrade = verdict === "haussier" || verdict === "baissier";
-  // Niveaux toujours calculés et affichés (achat/vente) — seuls le badge
-  // GO/AVOID/WAIT et la mention "signal neutralisé" reflètent le verdict
-  // final.
   const atrStop = levelsDirection === "haussier" ? tradeLevels.stop : null;
   const atrStopShort = levelsDirection === "baissier" ? tradeLevels.stop : null;
   const takeProfit = tradeLevels.target;
@@ -962,7 +795,6 @@ async function runMarketAnalysis(type, query) {
       : "Actualités non incluses",
   ].filter(Boolean);
 
-  // --- Indicateurs additionnels nécessaires uniquement à Sentinel Engine ---
   const macd = calcMACD(closes);
   const macdHistogramLast = macd.histogram[lastIdx];
 
@@ -987,9 +819,6 @@ async function runMarketAnalysis(type, query) {
       }
     : null;
 
-  // Sentinel attend `structure.direction` OU `structure.regime` selon les
-  // fonctions internes du moteur (incohérence dans sentinel-engine.js) :
-  // on fournit les deux pour couvrir tous les cas.
   const sentinelInput = {
     currentPrice,
     support,
@@ -1032,16 +861,10 @@ async function runMarketAnalysis(type, query) {
     atrStopShort,
     takeProfit,
     riskReward,
-    sentinel, // { score, bias, setup, status, breakdown, reasons, warnings }
+    sentinel,
   };
 }
 
-// ================= Graphique en chandelier (Calculateur) =================
-// Composant SVG autonome (aucune dépendance de charting externe) : dessine
-// de vraies bougies OHLC avec mèches, plus des lignes de niveau (entrée,
-// stop, take-profit, support, résistance) superposées. Le domaine de l'axe Y
-// inclut ces niveaux même s'ils sortent de la fourchette des bougies, pour
-// qu'un stop/target projeté loin du prix reste visible.
 const RANGE_OPTIONS = [
   { key: "1j", label: "1J" },
   { key: "5j", label: "5J" },
@@ -1054,7 +877,7 @@ function CandleChart({ candles, overlays = [], height = 260 }) {
 
   const width = 640;
   const padLeft = 6;
-  const padRight = 56; // réserve pour les étiquettes de prix à droite
+  const padRight = 56;
   const padTop = 14;
   const padBottom = 26;
   const innerW = width - padLeft - padRight;
@@ -1079,7 +902,6 @@ function CandleChart({ candles, overlays = [], height = 260 }) {
   const slot = innerW / n;
   const bodyWidth = Math.max(1.5, Math.min(10, slot * 0.6));
 
-  // Étiquettes de dates : 4 repères répartis sur l'axe X, format court.
   const dateTickIdx = [0, Math.floor((n - 1) / 3), Math.floor((2 * (n - 1)) / 3), n - 1].filter(
     (v, i, arr) => arr.indexOf(v) === i
   );
@@ -1089,12 +911,10 @@ function CandleChart({ candles, overlays = [], height = 260 }) {
     return d.toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit" });
   };
 
-  // Étiquettes de prix : 4 repères sur l'axe Y.
   const priceTicks = [0, 1, 2, 3].map((i) => domainMin + ((domainMax - domainMin) * i) / 3);
 
   return (
     <svg viewBox={`0 0 ${width} ${height}`} width="100%" height={height} style={{ display: "block" }}>
-      {/* Grille horizontale + étiquettes de prix */}
       {priceTicks.map((v, i) => (
         <g key={i}>
           <line x1={padLeft} x2={width - padRight} y1={yFor(v)} y2={yFor(v)} stroke={LINE} strokeWidth={1} />
@@ -1104,7 +924,6 @@ function CandleChart({ candles, overlays = [], height = 260 }) {
         </g>
       ))}
 
-      {/* Lignes de niveau (entrée / stop / take-profit / support / résistance) */}
       {overlays
         .filter((o) => o.value != null)
         .map((o, i) => (
@@ -1124,7 +943,6 @@ function CandleChart({ candles, overlays = [], height = 260 }) {
           </g>
         ))}
 
-      {/* Bougies */}
       {candles.map((c, i) => {
         const x = padLeft + i * slot + slot / 2;
         const up = c.close >= c.open;
@@ -1147,7 +965,6 @@ function CandleChart({ candles, overlays = [], height = 260 }) {
         );
       })}
 
-      {/* Étiquettes de dates */}
       {dateTickIdx.map((idx) => {
         const x = padLeft + idx * slot + slot / 2;
         return (
@@ -1160,21 +977,9 @@ function CandleChart({ candles, overlays = [], height = 260 }) {
   );
 }
 
-// Nombre de jours CoinGecko à demander pour chaque plage. CoinGecko impose
-// sa propre granularité de bougie selon la fenêtre (ex: pas de 30 min sur 1
-// jour, pas journalier au-delà de 30 jours) — on ne la choisit pas.
-// "5J" utilise 7 jours : c'est la plage la plus proche que CoinGecko
-// supporte réellement (pas de valeur "5" acceptée par l'endpoint /ohlc).
 const CRYPTO_DAYS_BY_RANGE = { "1j": 1, "5j": 7, "1m": 30, "6m": 180 };
-// Nombre de bougies journalières à garder pour actions/devises, où seul
-// l'historique quotidien (Alpha Vantage) est disponible gratuitement — pas
-// d'intraday. "1J" retombe donc sur la dernière bougie journalière connue.
 const DAILY_BARS_BY_RANGE = { "1j": 2, "5j": 5, "1m": 22, "6m": 130 };
 
-// Récupère les bougies pour le graphique du Calculateur, selon le type
-// d'actif et la plage sélectionnée. Renvoie toujours { candles, note } :
-// `note` porte un avertissement à afficher (ex: pas d'intraday, pas
-// d'historique pour les métaux) sans bloquer l'affichage du reste.
 async function fetchCalculatorCandles({ assetType, rawQuery, rangeKey }) {
   if (!rawQuery) throw new Error("Actif inconnu");
 
@@ -1185,8 +990,6 @@ async function fetchCalculatorCandles({ assetType, rawQuery, rangeKey }) {
   }
 
   if (assetType === "matieres") {
-    // Or / argent : gold-api.com ne fournit pas d'historique gratuit (voir
-    // fetchMetalPrice plus haut) — impossible d'afficher un chandelier.
     throw new Error("Historique indisponible gratuitement pour l'or/l'argent — seul le prix en temps réel est affiché ailleurs dans l'appli.");
   }
 
@@ -1198,7 +1001,6 @@ async function fetchCalculatorCandles({ assetType, rawQuery, rangeKey }) {
     return { candles, note };
   }
 
-  // actions
   const full = await fetchAlphaHistory(rawQuery.toUpperCase());
   const bars = DAILY_BARS_BY_RANGE[rangeKey];
   const candles = full.slice(-bars);
@@ -1299,7 +1101,6 @@ function TradeChart({ assetType, rawQuery, symbol, entry, stop, takeProfit, supp
   );
 }
 
-// ================= Dossier d'analyse =================
 function Dossier({ setTab, setPrefillCalc }) {
   const [type, setType] = useState("crypto");
   const [query, setQuery] = useState("");
@@ -1488,11 +1289,6 @@ function Dossier({ setTab, setPrefillCalc }) {
   );
 }
 
-// ================= Top 15 marchés =================
-// Liste fixe : 8 cryptos (CoinGecko, gratuit/illimité) + or/argent
-// (gold-api.com, gratuit/illimité) + 5 devises majeures (Alpha Vantage,
-// 1 seul appel chacune grâce à runMarketAnalysis) = 5 crédits Alpha Vantage
-// consommés par scan, sur un quota de 25/jour.
 const WATCHLIST = [
   { type: "crypto", query: "bitcoin", label: "Bitcoin (BTC)" },
   { type: "crypto", query: "ethereum", label: "Ethereum (ETH)" },
@@ -1511,15 +1307,12 @@ const WATCHLIST = [
   { type: "fx", query: "CAD", label: "CAD/USD" },
 ];
 
-// Traduction du verdict en action concrète pour l'utilisateur.
 const ACTION_MAP = {
   haussier: { label: "GO", color: POS },
   baissier: { label: "AVOID", color: NEG },
   mitigé: { label: "WAIT", color: MUTED },
 };
 
-// "Bitcoin (BTC)" -> { name: "Bitcoin", ticker: "BTC" }. Si pas de
-// parenthèses (ex: "EUR/USD"), le label entier sert de nom.
 function splitLabel(label) {
   const m = label.match(/^(.+?)\s*\(([^)]+)\)$/);
   if (m) return { name: m[1], ticker: m[2] };
@@ -1538,8 +1331,6 @@ function TopMarkets({ onSendToCalculator }) {
     setResults([]);
     setProgress({ done: 0, total: WATCHLIST.length });
 
-    // Logos + variation 24h pour les cryptos : un seul appel groupé
-    // (coins/markets avec ids=...) plutôt qu'un appel par actif.
     const cryptoIds = WATCHLIST.filter((w) => w.type === "crypto").map((w) => w.query);
     const marketsMeta = await fetchCoinGeckoMarketsByIds(cryptoIds);
     const metaMap = {};
@@ -1555,12 +1346,6 @@ function TopMarkets({ onSendToCalculator }) {
       setProgress({ done: doneCount, total: WATCHLIST.length });
     };
 
-    // On sépare les marchés selon leur contrainte de débit :
-    // - crypto + or/argent (CoinGecko / gold-api.com) : pas de vraie limite,
-    //   on peut les lancer en parallèle par petits paquets.
-    // - devises (Alpha Vantage, 5 req/min en gratuit) : on les garde
-    //   espacées, mais ce bloc tourne EN MEME TEMPS que le bloc rapide
-    //   au lieu d'attendre qu'il ait fini.
     const fastIndexes = [];
     const fxIndexes = [];
     WATCHLIST.forEach((item, idx) => {
@@ -1583,9 +1368,6 @@ function TopMarkets({ onSendToCalculator }) {
         });
       } catch (e) {
         const isFx = item.type === "fx" && !isMetal(item.query);
-        // Un seul retry, et seulement pour crypto/métaux (pas les devises,
-        // pour ne pas gaspiller le quota Alpha Vantage) : CoinGecko renvoie
-        // souvent une erreur passagère de rate-limit sur les scans à 8 actifs.
         if (!isFx && attempt < 1) {
           await new Promise((res) => setTimeout(res, 2000));
           return runOne(idx, attempt + 1);
@@ -1605,14 +1387,10 @@ function TopMarkets({ onSendToCalculator }) {
     const runFx = async () => {
       for (const idx of fxIndexes) {
         await runOne(idx);
-        // Espacement réduit à 1s (au lieu de 3s) : 5 devises = 5 requêtes
-        // Alpha Vantage, largement sous la limite de 5/min même avec ce délai.
         await new Promise((res) => setTimeout(res, 1000));
       }
     };
 
-    // Les deux blocs tournent en parallèle : le temps total du scan est
-    // borné par le plus lent des deux, pas par leur somme.
     await Promise.all([runFast(), runFx()]);
 
     const ok = settled.filter((r) => !r.error);
@@ -1625,9 +1403,6 @@ function TopMarkets({ onSendToCalculator }) {
     setLoading(false);
   }, []);
 
-  // Scan automatique à l'ouverture de l'onglet — plus de bouton manuel.
-  // Le cache (15 min) sur les appels Alpha Vantage/CoinGecko limite les
-  // doublons si l'onglet est réouvert peu après.
   useEffect(() => {
     runScan();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1668,29 +1443,12 @@ function TopMarkets({ onSendToCalculator }) {
             }
 
             const action = ACTION_MAP[r.verdict] || ACTION_MAP["mitigé"];
-            // Le stop-loss doit suivre la direction utilisée pour calculer
-            // les niveaux (levelsDirection), pas le verdict final : sur un
-            // WAIT, verdict et levelsDirection peuvent diverger (ex: vote
-            // technique légèrement baissier neutralisé par le garde-fou
-            // RSI/R:R). Utiliser verdict ici pointait vers un champ
-            // (atrStop / atrStopShort) resté à null, ce qui cassait
-            // l'affichage des niveaux sur certains actifs WAIT (cas
-            // observé sur Bitcoin / Dogecoin).
             const isBearishLevels = r.levelsDirection === "baissier";
-            // L'entrée automatique est le prix courant. Le take-profit
-            // vient du moteur (cible corrigée, cohérente avec le sens du
-            // signal, calculée même sur un WAIT) ; le stop-loss selon la
-            // direction.
             const buyPrice = r.price;
             const sellPrice = r.takeProfit;
             const stopPrice = isBearishLevels ? r.atrStopShort : r.atrStop;
             const hasLevels = sellPrice != null && stopPrice != null;
             const hasChange = r.change24h != null;
-            // R:R déjà calculé par runMarketAnalysis mais jusqu'ici jamais
-            // affiché dans le Top 15 — sans lui, deux signaux avec des
-            // % de mouvement très différents (ex: +3% vs +7,5%) sont
-            // indiscernables en qualité de setup (stop serré + bon R:R vs
-            // stop large + R:R faible peuvent donner le même % affiché).
             const hasRR = r.riskReward != null && Number.isFinite(r.riskReward);
 
             return (
@@ -1806,7 +1564,6 @@ function TopMarkets({ onSendToCalculator }) {
   );
 }
 
-// ================= Calculateur =================
 const LEVERAGE_PRESETS = {
   crypto: { label: "Crypto (CFD)", leverage: 2 },
   forex: { label: "Forex", leverage: 30 },
@@ -1815,12 +1572,6 @@ const LEVERAGE_PRESETS = {
   spot: { label: "Spot (Binance, sans levier)", leverage: 1 },
 };
 
-// Défini en dehors de Calculateur : sinon React recrée ce composant à
-// chaque frappe et l'input perd le focus après chaque caractère.
-// Style volontairement très différent entre verrouillé (mode auto : la
-// valeur vient du moteur, non modifiable) et modifiable (mode manuel, ou
-// le champ "Montant à investir" qui reste éditable même en mode auto) :
-// gris + icône cadenas d'un côté, bordure ambre de l'autre.
 function CalcField({ label, value, onChange, placeholder, readOnly = false }) {
   return (
     <div style={{ marginBottom: 12 }}>
@@ -1869,6 +1620,11 @@ function Calculateur({ prefill }) {
   const [stop, setStop] = useState(prefill?.stop?.toString() || "");
   const [takeProfit, setTakeProfit] = useState(prefill?.takeProfit?.toString() || "");
 
+  // --- Historique / garde-fous ---
+  const [guidanceWarnings, setGuidanceWarnings] = useState([]);
+  const [pendingLog, setPendingLog] = useState(null);
+  const [logged, setLogged] = useState(false);
+
   useEffect(() => {
     if (!prefill) return;
     const nextAsset = prefill.assetType || "crypto";
@@ -1879,6 +1635,9 @@ function Calculateur({ prefill }) {
     setEntry(prefill.entry?.toString() || "");
     setStop(prefill.stop?.toString() || "");
     setTakeProfit(prefill.takeProfit?.toString() || "");
+    setGuidanceWarnings([]);
+    setPendingLog(null);
+    setLogged(false);
   }, [prefill]);
 
   const onAssetType = (t) => {
@@ -1906,6 +1665,51 @@ function Calculateur({ prefill }) {
   const field = (label, value, onChange, placeholder, locked = autoLocked) => (
     <CalcField label={label} value={value} onChange={onChange} placeholder={placeholder} readOnly={locked} />
   );
+
+  // Construit l'objet trade à partir des valeurs actuelles du calcul, pour
+  // le bouton "Marquer comme pris" (onglet Historique).
+  const buildCandidateTrade = () => {
+    const direction = prefill?.direction || (s < e ? "long" : "short");
+    return {
+      symbol: prefill?.symbol || assetType,
+      assetType,
+      direction,
+      entry: e,
+      stop: s,
+      takeProfit: tp > 0 ? tp : null,
+      invested: inv,
+      leverage: lev,
+      quantity,
+      positionValue,
+      riskAmount: lossAmount,
+      potentialGain: gainAmount,
+      riskPct: lossPctOfInvested,
+      verdict: prefill?.verdict || null,
+    };
+  };
+
+  const handleTradePris = () => {
+    if (!valid) return;
+    const candidate = buildCandidateTrade();
+    const warnings = checkGuidance(candidate);
+    if (warnings.length > 0) {
+      setGuidanceWarnings(warnings);
+      setPendingLog(candidate);
+    } else {
+      addTrade(candidate);
+      setLogged(true);
+      setTimeout(() => setLogged(false), 2500);
+    }
+  };
+
+  const confirmLogAnyway = () => {
+    if (!pendingLog) return;
+    addTrade(pendingLog);
+    setGuidanceWarnings([]);
+    setPendingLog(null);
+    setLogged(true);
+    setTimeout(() => setLogged(false), 2500);
+  };
 
   return (
     <div>
@@ -1970,11 +1774,54 @@ function Calculateur({ prefill }) {
       ) : (
         <div style={{ fontSize: 12, color: MUTED, marginTop: 8 }}>{autoLocked && prefill?.symbol ? "Le moteur n'a pas fourni tous les niveaux nécessaires pour calculer automatiquement ce trade. Passe en mode Manuel pour définir les niveaux." : "Remplis montant, levier, entrée et stop-loss pour voir le calcul."}</div>
       )}
+
+      {valid && (
+        <div style={{ marginTop: 12 }}>
+          {guidanceWarnings.length > 0 ? (
+            <div style={{ background: "rgba(255,103,103,0.08)", border: `1px solid ${NEG}`, borderRadius: 10, padding: 12 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: NEG, marginBottom: 6 }}>⚠️ Avant de confirmer :</div>
+              {guidanceWarnings.map((w, i) => (
+                <div key={i} style={{ fontSize: 12, color: TEXT, marginBottom: 4 }}>• {w}</div>
+              ))}
+              <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                <button
+                  onClick={confirmLogAnyway}
+                  style={{ flex: 1, background: NEG, border: "none", borderRadius: 8, padding: "8px 0", color: "#fff", fontWeight: 700, fontSize: 12, cursor: "pointer" }}
+                >
+                  Confirmer quand même
+                </button>
+                <button
+                  onClick={() => { setGuidanceWarnings([]); setPendingLog(null); }}
+                  style={{ flex: 1, background: "transparent", border: `1px solid ${LINE}`, borderRadius: 8, padding: "8px 0", color: MUTED, fontWeight: 700, fontSize: 12, cursor: "pointer" }}
+                >
+                  Annuler
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              onClick={handleTradePris}
+              style={{
+                width: "100%",
+                background: logged ? POS : "rgba(61,214,140,0.12)",
+                border: `1px solid ${POS}`,
+                color: logged ? "#06231a" : POS,
+                borderRadius: 8,
+                padding: "10px 0",
+                fontSize: 13,
+                fontWeight: 700,
+                cursor: "pointer",
+              }}
+            >
+              {logged ? "✓ Enregistré dans l'historique" : "✅ Marquer comme pris"}
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
-// ================= App =================
 export default function TradingApp() {
   const [tab, setTab] = useState("top15");
   const [prefillCalc, setPrefillCalc] = useState(null);
@@ -1983,6 +1830,7 @@ export default function TradingApp() {
     { id: "top15", label: "Top 15", icon: ListOrdered },
     { id: "dossier", label: "Dossier", icon: FileText },
     { id: "calc", label: "Calculateur", icon: Calculator },
+    { id: "historique", label: "Historique", icon: HistoryIcon },
   ];
 
   return (
@@ -2034,6 +1882,7 @@ export default function TradingApp() {
         )}
         {tab === "dossier" && <Dossier setTab={setTab} setPrefillCalc={setPrefillCalc} />}
         {tab === "calc" && <Calculateur prefill={prefillCalc} />}
+        {tab === "historique" && <HistoryTab />}
       </div>
     </div>
   );
