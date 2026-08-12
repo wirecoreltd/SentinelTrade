@@ -722,7 +722,7 @@ async function runMarketAnalysis(type, query) {
         takeProfit = support;
         riskReward = (price.price - takeProfit) / (atrStopShort - price.price);
       }
-      levelsNote =
+     levelsNote =
         verdict === "mitigé"
           ? "Historique insuffisant pour une analyse technique complète (moins de 60 jours) — actualités neutres, niveaux basés sur le min/max de la période disponible à titre indicatif"
           : "Historique insuffisant pour une analyse technique complète (moins de 60 jours) — niveaux basés sur le min/max de la période disponible, verdict basé sur les actualités";
@@ -733,14 +733,26 @@ async function runMarketAnalysis(type, query) {
           : "Historique de prix indisponible — verdict basé uniquement sur les actualités";
     }
 
+    // Même garde-fou risque/récompense que la branche technique complète :
+    // sans lui, un actif comme l'or/l'argent (bande fixe ±1.5% / stop
+    // ±0.5% => R:R structurellement ~0.75:1 dans les deux sens) pouvait
+    // afficher un GO/AVOID basé uniquement sur les actualités, avec un
+    // ratio risque/récompense défavorable et aucun avertissement.
+    let rrDowngraded = false;
+    if ((verdict === "haussier" || verdict === "baissier") && (riskReward == null || riskReward < 1)) {
+      verdict = "mitigé";
+      rrDowngraded = true;
+    }
+
     const reasoning = [
       levelsNote,
+      rrDowngraded && "Signal neutralisé (WAIT) : ratio risque/récompense insuffisant sur ce setup",
       news
         ? `Actualités : ton ${news.label} sur ${news.articleCount} articles récents`
         : newsError
         ? `Actualités indisponibles : ${newsError}`
         : "Actualités non incluses",
-    ];
+    ].filter(Boolean);
 
     return {
       symbol: query.toUpperCase(),
