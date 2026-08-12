@@ -513,7 +513,7 @@ function detectMarketStructure(history, span = 2) {
   }
 
   if (swingHighs.length < 2 || swingLows.length < 2) {
-    return { regime: "indéterminé", ..., support: null, resistance: null };
+    return { regime: "indéterminé", bos: false, choch: false, support: null, resistance: null };
   }
 
   const lastHigh = swingHighs[swingHighs.length - 1];
