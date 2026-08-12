@@ -508,12 +508,12 @@ function detectMarketStructure(history, span = 2) {
   for (let i = span; i < history.length - span; i++) {
     const windowH = highs.slice(i - span, i + span + 1);
     const windowL = lows.slice(i - span, i + span + 1);
-    if (highs[i] === Math.max(...windowH)) swingHighs.push({ price: highs[i] });
+     if (highs[i] === Math.max(...windowH)) swingHighs.push({ price: highs[i] });
     if (lows[i] === Math.min(...windowL)) swingLows.push({ price: lows[i] });
   }
 
   if (swingHighs.length < 2 || swingLows.length < 2) {
-    return { regime: "indéterminé", bos: false, choch: false, support: null, resistance: null };
+    return { regime: "indéterminé", ..., support: null, resistance: null };
   }
 
   const lastHigh = swingHighs[swingHighs.length - 1];
