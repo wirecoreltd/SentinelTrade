@@ -16,7 +16,7 @@ import {
 } from "lucide-react";
 import { NAVY, PANEL, ACCENT, TEXT, MUTED, LINE, POS, NEG, AMBER, LOCKED_BG } from "../lib/theme";
 import { formatPrice } from "../lib/format";
-import { addTrade, checkGuidance } from "../lib/tradeHistory";
+import { addTrade, checkGuidance, loadHistory, getOpenTrades } from "../lib/tradeHistory";
 import HistoryTab from "../components/HistoryTab";
 
 // ---------- Helper: extrait un message d'erreur exploitable d'une réponse Alpha Vantage ----------
@@ -1380,23 +1380,121 @@ const ACTION_MAP = {
   mitigé: { label: "WAIT", color: MUTED },
 };
 
+// ============================================================================
+// Croisement Top 15 <-> historique de trades (positions ouvertes)
+// ============================================================================
+
+// Détermine le assetType (même convention que tradeHistory / Calculateur)
+// pour un résultat de scan Top 15.
+function assetTypeForResult(r) {
+  if (r.type === "crypto") return "crypto";
+  if (r.type === "fx" && isMetal(r.query)) return "matieres";
+  if (r.type === "fx") return "forex";
+  return "actions";
+}
+
+const POSITION_BADGE = {
+  stopTouched: { label: "STOP TOUCHÉ", color: NEG },
+  stopProche: { label: "STOP PROCHE", color: NEG },
+  objectifAtteint: { label: "OBJECTIF ATTEINT", color: POS },
+  cloturer: { label: "CLÔTURER", color: NEG },
+  objectifProche: { label: "OBJECTIF PROCHE", color: POS },
+  renforcer: { label: "RENFORCER", color: POS },
+  patienter: { label: "PATIENTER", color: AMBER },
+};
+
+function formatTradeDateShort(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit" });
+}
+
+// Calcule la recommandation de gestion de position pour un trade ouvert
+// donné, en croisant son entrée/stop/TP avec le prix et le verdict actuels
+// du marché issus du scan Top 15.
+function computePositionGuidance(trade, r) {
+  const isLong = trade.direction !== "short";
+  const currentPrice = r.price;
+  const entryPrice = trade.entry;
+  const stopPrice = trade.stop;
+  const tpPrice = trade.takeProfit;
+
+  const pnlPct =
+    entryPrice != null && entryPrice !== 0
+      ? (isLong ? (currentPrice - entryPrice) / entryPrice : (entryPrice - currentPrice) / entryPrice) * 100
+      : null;
+  const pnlText = pnlPct != null ? `${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(1)}%` : "—";
+  const base = `En position depuis le ${formatTradeDateShort(trade.createdAt)}, entrée $${formatPrice(entryPrice)}, prix actuel $${formatPrice(currentPrice)} (${pnlText}).`;
+
+  // 1. Stop touché
+  if (stopPrice != null && (isLong ? currentPrice <= stopPrice : currentPrice >= stopPrice)) {
+    return { key: "stopTouched", message: `${base} Le stop-loss ($${formatPrice(stopPrice)}) est touché ou dépassé — protège ton capital.` };
+  }
+
+  // 2. Stop proche (moins de 25% de la distance d'entrée au stop)
+  if (stopPrice != null) {
+    const totalStopDistance = isLong ? entryPrice - stopPrice : stopPrice - entryPrice;
+    const distanceToStop = isLong ? currentPrice - stopPrice : stopPrice - currentPrice;
+    if (totalStopDistance > 0 && distanceToStop / totalStopDistance <= 0.25) {
+      return { key: "stopProche", message: `${base} Prix à ${(100 * distanceToStop / totalStopDistance).toFixed(0)}% de la distance du stop ($${formatPrice(stopPrice)}) — surveille de près.` };
+    }
+  }
+
+  // 3. Take-profit atteint ou dépassé
+  if (tpPrice != null && (isLong ? currentPrice >= tpPrice : currentPrice <= tpPrice)) {
+    return { key: "objectifAtteint", message: `${base} Le take-profit ($${formatPrice(tpPrice)}) est atteint ou dépassé — envisage de sécuriser les gains.` };
+  }
+
+  const marketBullish = r.verdict === "haussier";
+  const marketBearish = r.verdict === "baissier";
+
+  // 4. Le marché s'est retourné contre la position
+  if ((isLong && marketBearish) || (!isLong && marketBullish)) {
+    return { key: "cloturer", message: `${base} Le marché s'est retourné contre ta position (signal désormais ${r.verdict}) — envisage de clôturer pour limiter le risque.` };
+  }
+
+  // 5. Take-profit proche (moins de 25% de la distance restante)
+  if (tpPrice != null) {
+    const totalTpDistance = isLong ? tpPrice - entryPrice : entryPrice - tpPrice;
+    const distanceToTp = isLong ? tpPrice - currentPrice : currentPrice - tpPrice;
+    if (totalTpDistance > 0 && distanceToTp / totalTpDistance <= 0.25) {
+      return { key: "objectifProche", message: `${base} Prix à ${(100 * distanceToTp / totalTpDistance).toFixed(0)}% de la distance de l'objectif ($${formatPrice(tpPrice)}) — envisage de sécuriser une partie des gains.` };
+    }
+  }
+
+  // 6. Le marché confirme toujours la direction de la position
+  if ((isLong && marketBullish) || (!isLong && marketBearish)) {
+    return { key: "renforcer", message: `${base} Signal toujours ${r.verdict} — tu peux envisager de renforcer la position.` };
+  }
+
+  // 7. Rien de particulier
+  return { key: "patienter", message: `${base} Signal neutre, rien de particulier à signaler pour l'instant — patiente.` };
+}
+
 function splitLabel(label) {
   const m = label.match(/^(.+?)\s*\(([^)]+)\)$/);
   if (m) return { name: m[1], ticker: m[2] };
   return { name: label, ticker: "" };
 }
 
-function TopMarkets({ onSendToCalculator }) {
+function TopMarkets({ onSendToCalculator, onGoToHistorique }) {
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: WATCHLIST.length });
   const [results, setResults] = useState([]);
   const [error, setError] = useState("");
+  const [openTrades, setOpenTrades] = useState([]);
+
+  useEffect(() => {
+    setOpenTrades(getOpenTrades(loadHistory()));
+  }, []);
 
   const runScan = useCallback(async () => {
     setLoading(true);
     setError("");
     setResults([]);
     setProgress({ done: 0, total: WATCHLIST.length });
+    setOpenTrades(getOpenTrades(loadHistory()));
 
     const cryptoIds = WATCHLIST.filter((w) => w.type === "crypto").map((w) => w.query);
     const marketsMeta = await fetchCoinGeckoMarketsByIds(cryptoIds);
@@ -1479,8 +1577,10 @@ function TopMarkets({ onSendToCalculator }) {
     <div>
       <div style={{ fontSize: 13, color: MUTED, marginBottom: 16 }}>
         Scan classé de 15 marchés (8 cryptos, or, argent, 5 devises majeures) avec la même
-        analyse que le Dossier — tendances 7j/30j/90j + sentiment des actualités. Clique un
-        marché pour l'envoyer directement au calculateur.
+        analyse que le Dossier — tendances 7j/30j/90j + sentiment des actualités. Pour un actif
+        où tu as déjà une position ouverte, le badge devient une recommandation de gestion de
+        position (renforcer, conserver, sécuriser, clôturer…) basée sur ton historique. Clique
+        un marché pour l'envoyer au calculateur ou gérer la position existante.
       </div>
 
       {loading && (
@@ -1509,32 +1609,51 @@ function TopMarkets({ onSendToCalculator }) {
               );
             }
 
-            const action = ACTION_MAP[r.verdict] || ACTION_MAP["mitigé"];
+            const resultSymbol = r.symbol || r.query.toUpperCase();
+            const resultAssetType = assetTypeForResult(r);
+            const matchedTrade = openTrades.find(
+              (t) => t.symbol === resultSymbol && t.assetType === resultAssetType
+            );
+            const guidance = matchedTrade ? computePositionGuidance(matchedTrade, r) : null;
+
+            const action = guidance ? POSITION_BADGE[guidance.key] : ACTION_MAP[r.verdict] || ACTION_MAP["mitigé"];
+
             const isBearishLevels = r.levelsDirection === "baissier";
             const buyPrice = r.price;
             const sellPrice = r.takeProfit;
             const stopPrice = isBearishLevels ? r.atrStopShort : r.atrStop;
-            const hasLevels = sellPrice != null && stopPrice != null;
+            const hasLevels = !guidance && sellPrice != null && stopPrice != null;
             const hasChange = r.change24h != null;
-            const hasRR = r.riskReward != null && Number.isFinite(r.riskReward);
+            const hasRR = !guidance && r.riskReward != null && Number.isFinite(r.riskReward);
+
+            // Pour une position déjà ouverte gérée depuis l'Historique
+            // (stop/objectif proche ou atteint, ou retournement), le clic
+            // amène vers l'onglet Historique plutôt que de proposer un
+            // nouveau trade. "Renforcer" et l'absence de position ouverte
+            // continuent d'envoyer vers le Calculateur.
+            const handleClick = () => {
+              if (guidance && guidance.key !== "renforcer" && guidance.key !== "patienter") {
+                onGoToHistorique();
+                return;
+              }
+              onSendToCalculator({
+                entry: buyPrice,
+                stop: stopPrice,
+                takeProfit: sellPrice,
+                support: r.support,
+                resistance: r.resistance,
+                assetType: resultAssetType,
+                direction: isBearishLevels ? "short" : "long",
+                symbol: resultSymbol,
+                rawQuery: r.rawQuery || r.query,
+                verdict: r.verdict,
+              });
+            };
 
             return (
               <button
                 key={`${r.type}-${r.query}`}
-                onClick={() =>
-                  onSendToCalculator({
-                    entry: buyPrice,
-                    stop: stopPrice,
-                    takeProfit: sellPrice,
-                    support: r.support,
-                    resistance: r.resistance,
-                    assetType: r.type === "crypto" ? "crypto" : r.type === "fx" && isMetal(r.query) ? "matieres" : r.type === "fx" ? "forex" : "actions",
-                    direction: isBearishLevels ? "short" : "long",
-                    symbol: r.symbol || r.query.toUpperCase(),
-                    rawQuery: r.rawQuery || r.query,
-                    verdict: r.verdict,
-                  })
-                }
+                onClick={handleClick}
                 style={{
                   background: PANEL,
                   border: `1px solid ${LINE}`,
@@ -1546,7 +1665,7 @@ function TopMarkets({ onSendToCalculator }) {
                   width: "100%",
                 }}
               >
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: hasLevels ? 10 : 0 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: hasLevels || guidance ? 10 : 0 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     {r.image ? (
                       <img src={r.image} alt="" width={22} height={22} style={{ borderRadius: "50%", flexShrink: 0 }} />
@@ -1598,6 +1717,12 @@ function TopMarkets({ onSendToCalculator }) {
                     {action.label}
                   </div>
                 </div>
+
+                {guidance && (
+                  <div style={{ background: NAVY, borderRadius: 8, padding: "8px 10px", fontSize: 12, color: TEXT, lineHeight: 1.5 }}>
+                    {guidance.message}
+                  </div>
+                )}
 
                 {hasLevels && (
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: hasRR ? 8 : 0 }}>
@@ -1945,6 +2070,7 @@ export default function TradingApp() {
               setPrefillCalc(prefill);
               setTab("calc");
             }}
+            onGoToHistorique={() => setTab("historique")}
           />
         )}
         {tab === "dossier" && <Dossier setTab={setTab} setPrefillCalc={setPrefillCalc} />}
