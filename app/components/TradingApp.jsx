@@ -569,13 +569,15 @@ const ATR_FALLBACK_STOP_MULT = 1.5;
 // d'atteindre les fallbacks internes déjà en place plus bas — l'actif
 // restait WAIT sans aucun prix affiché, contrairement à un stop ATR
 // classique qui reste au moins approximatif.
-const PRICE_PCT_FALLBACK_STOP = 0.03; // 3% du prix courant
+//const PRICE_PCT_FALLBACK_STOP = 0.03; // 3% du prix courant
+const MIN_ATR_PCT_OF_PRICE = 0.008;
 
 function computeTradeLevels({ verdict, currentPrice, support, resistance, atr }) {
   // atr peut être null (historique insuffisant pour Wilder-14, ou données
   // trop plates) : on substitue un pseudo-ATR basé sur 3% du prix courant
   // pour ne jamais renvoyer un résultat totalement vide.
-  const effectiveAtr = atr != null ? atr : currentPrice * PRICE_PCT_FALLBACK_STOP;
+  const rawEffectiveAtr = atr != null ? atr : currentPrice * PRICE_PCT_FALLBACK_STOP;
+   const effectiveAtr = Math.max(rawEffectiveAtr, currentPrice * MIN_ATR_PCT_OF_PRICE);
 
   if (verdict === "haussier") {
     if (support == null) return { stop: null, target: null, riskReward: null, projected: false };
