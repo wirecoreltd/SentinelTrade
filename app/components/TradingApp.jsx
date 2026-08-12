@@ -55,22 +55,52 @@ async function fetchMetalPrice(symbol) {
 }
 
 // ---------- Helpers API ----------
-async function fetchCoinGeckoPrice(id) {
-  const res = await fetch(
-    `https://api.coingecko.com/api/v3/simple/price?ids=${id}&vs_currencies=usd&include_24hr_change=true`
-  );
-  if (!res.ok) throw new Error("Identifiant crypto introuvable");
+// Toutes les requêtes CoinGecko passent par le proxy interne /api/coingecko
+// (route.js) : ça évite les erreurs CORS que CoinGecko renvoie parfois côté
+// navigateur en cas de rate-limit, et ça permet d'utiliser la clé API côté
+// serveur (COINGECKO_KEY) pour un quota plus large.
+async function coingeckoProxy(path, params = {}) {
+  const query = new URLSearchParams({ path, ...params }).toString();
+  const res = await fetch(`/api/coingecko?${query}`);
   const data = await res.json();
+  if (!res.ok) throw new Error(data?.error || "Erreur CoinGecko");
+  return data;
+}
+
+async function fetchCoinGeckoPrice(id) {
+  const data = await coingeckoProxy("simple/price", {
+    ids: id,
+    vs_currencies: "usd",
+    include_24hr_change: "true",
+  }).catch(() => {
+    throw new Error("Identifiant crypto introuvable");
+  });
   if (!data[id]) throw new Error("Identifiant crypto introuvable");
   return { price: data[id].usd, change24h: data[id].usd_24h_change };
 }
 
 async function fetchCoinGeckoHistory(id, days) {
-  const res = await fetch(
-    `https://api.coingecko.com/api/v3/coins/${id}/market_chart?vs_currency=usd&days=${days}&interval=daily`
-  );
-  if (!res.ok) throw new Error("Historique crypto indisponible");
-  const data = await res.json();
+  const data = await coingeckoProxy(`coins/${id}/market_chart`, {
+    vs_currency: "usd",
+    days: days.toString(),
+    interval: "daily",
+  }).catch(() => {
+    throw new Error("Historique crypto indisponible");
+  });
+  return data.prices.map(([ts, price]) => ({ date: ts, close: price, high: price, low: price }));
+}
+
+async function fetchCoinGeckoTop(n = 10) {
+  return coingeckoProxy("coins/markets", {
+    vs_currency: "usd",
+    order: "market_cap_desc",
+    per_page: n.toString(),
+    page: "1",
+    price_change_percentage: "24h",
+  }).catch(() => {
+    throw new Error("Scanner indisponible");
+  });
+}
   // CoinGecko market_chart ne fournit qu'un prix de clôture par jour, pas de
   // vraies bougies OHLC. On approxime high = low = close : l'ATR/ADX calculés
   // dessus sont donc une volatilité clôture-à-clôture, pas une vraie amplitude
@@ -1260,6 +1290,14 @@ function TopMarkets({ onSendToCalculator }) {
     setError("");
     setResults([]);
     setProgress({ done: 0, total: WATCHLIST.length });
+
+    const BATCH_SIZE = 4;
+    const runFast = async () => {
+      for (let i = 0; i < fastIndexes.length; i += BATCH_SIZE) {
+        const batch = fastIndexes.slice(i, i + BATCH_SIZE);
+        await Promise.all(batch.map((idx) => runOne(idx)));
+      }
+    };
 
     const settled = new Array(WATCHLIST.length);
     let doneCount = 0;
