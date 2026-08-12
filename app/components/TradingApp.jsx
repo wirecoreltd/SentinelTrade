@@ -631,8 +631,6 @@ async function runMarketAnalysis(type, query) {
 
   const support = structure.support;
   const resistance = structure.resistance;
-  const atrStop = support != null && atr != null ? support - 1.2 * atr : null;
-  const atrStopShort = resistance != null && atr != null ? resistance + 1.2 * atr : null;
   // Stop-loss basé sur la volatilité réelle (ATR) plutôt qu'un pourcentage
   // fixe : plus l'actif est volatil, plus le stop est éloigné de l'entrée.
   const atrStop = support != null && atr != null ? support - 1.2 * atr : null;
@@ -667,21 +665,8 @@ async function runMarketAnalysis(type, query) {
       : "Actualités non incluses",
   ].filter(Boolean);
 
-  return {
-    symbol: query.toUpperCase(),
-    price: currentPrice,
-    support,
-    resistance,
-    verdict,
-    score: bull - bear,
-    reasoning,
-    news,
-    atrStop,
-    atrStopShort,
-  };
-}
-
- const macd = calcMACD(closes);
+  // --- Indicateurs additionnels nécessaires uniquement à Sentinel Engine ---
+  const macd = calcMACD(closes);
   const macdHistogramLast = macd.histogram[lastIdx];
 
   const atrSeries = calcATR(history, 14);
