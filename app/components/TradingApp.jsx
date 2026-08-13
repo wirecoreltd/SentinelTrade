@@ -1667,6 +1667,8 @@ function LongTermInvestissement({ onSendToCalculator }) {
   const [results, setResults] = useState([]);
   const [error, setError] = useState("");
   const cacheRef = useRef(null);
+  const liveIds = LONG_TERM_WATCHLIST.map((w) => w.query);
+  const livePrices = useBinanceLivePrices(liveIds);
 
   const runScan = useCallback(async () => {
     setError("");
@@ -1759,6 +1761,10 @@ function LongTermInvestissement({ onSendToCalculator }) {
           if (r.error) {
             return <div key={r.query} style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: 12, color: NEG, fontSize: 12 }}>{r.label} — {r.error}</div>;
           }
+
+          const isLive = livePrices[r.query] != null;
+          const displayPrice = isLive ? livePrices[r.query] : r.price;
+      
           const h = r.horizons[horizon];
           const verdictColor = h.label === "FAVORI" ? POS : h.label === "SURVEILLER" ? AMBER : MUTED;
           return (
@@ -1771,7 +1777,16 @@ function LongTermInvestissement({ onSendToCalculator }) {
                     </div>
                     <div style={{ minWidth: 0 }}>
                       <div style={{ fontSize: 14, fontWeight: 800 }}>{r.label}</div>
-                      <div style={{ fontSize: 12, color: MUTED }}>${formatPrice(r.price)} {r.change24h != null && <span style={{ color: r.change24h >= 0 ? POS : NEG }}>{r.change24h >= 0 ? "+" : ""}{r.change24h.toFixed(2)}%</span>}</div>
+
+                      <div style={{ fontSize: 12, color: MUTED, display: "flex", alignItems: "center", gap: 6 }}>
+                        ${formatPrice(displayPrice)} {r.change24h != null && (
+                          <span style={{ color: r.change24h >= 0 ? POS : NEG }}>
+                            {r.change24h >= 0 ? "+" : ""}{r.change24h.toFixed(2)}%
+                          </span>
+                        )}
+                        {isLive && <LiveBadge />}
+                      </div>
+                                            
                     </div>
                   </div>
                 </div>
