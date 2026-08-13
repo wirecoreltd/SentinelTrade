@@ -1,105 +1,90 @@
 import { NextResponse } from "next/server";
-import crypto from "crypto";
 
 export const runtime = "nodejs";
 
+const ENDPOINTS = [
+  {
+    name: "Binance Spot Testnet",
+    url: "https://testnet.binance.vision/api/v3/time",
+  },
+  {
+    name: "Binance Production",
+    url: "https://api.binance.com/api/v3/time",
+  },
+  {
+    name: "Binance GCP",
+    url: "https://api-gcp.binance.com/api/v3/time",
+  },
+  {
+    name: "Binance API 1",
+    url: "https://api1.binance.com/api/v3/time",
+  },
+  {
+    name: "Binance API 2",
+    url: "https://api2.binance.com/api/v3/time",
+  },
+  {
+    name: "Binance API 3",
+    url: "https://api3.binance.com/api/v3/time",
+  },
+  {
+    name: "Binance API 4",
+    url: "https://api4.binance.com/api/v3/time",
+  },
+  {
+    name: "Binance Market Data",
+    url: "https://data-api.binance.vision/api/v3/time",
+  },
+];
+
 export async function GET() {
-  const apiKey = process.env.BINANCE_API_KEY;
-  const secretKey = process.env.BINANCE_API_SECRET;
-  const baseUrl =
-    process.env.BINANCE_BASE_URL || "https://testnet.binance.vision";
+  const results = [];
 
-  if (!apiKey || !secretKey) {
-    return NextResponse.json(
-      {
-        ok: false,
-        error: "Binance API credentials are not configured.",
-        diagnostics: {
-          apiKeyConfigured: Boolean(apiKey),
-          secretConfigured: Boolean(secretKey),
-          baseUrl,
-        },
-      },
-      { status: 500 }
-    );
-  }
+  for (const endpoint of ENDPOINTS) {
+    const startedAt = Date.now();
 
-  try {
-    // 1. Récupérer l'heure du serveur Binance
-    const timeResponse = await fetch(
-      `${baseUrl}/api/v3/time`,
-      {
+    try {
+      const response = await fetch(endpoint.url, {
         method: "GET",
         cache: "no-store",
+      });
+
+      const text = await response.text();
+
+      let data;
+
+      try {
+        data = JSON.parse(text);
+      } catch {
+        data = text;
       }
-    );
 
-    if (!timeResponse.ok) {
-      const errorText = await timeResponse.text();
-
-      return NextResponse.json(
-        {
-          ok: false,
-          error: "Unable to retrieve Binance server time.",
-          status: timeResponse.status,
-          response: errorText,
-        },
-        { status: 502 }
-      );
-    }
-
-    const timeData = await timeResponse.json();
-    const timestamp = timeData.serverTime;
-
-    // 2. Construire la requête signée
-    const queryString = `timestamp=${timestamp}&recvWindow=5000`;
-
-    const signature = crypto
-      .createHmac("sha256", secretKey)
-      .update(queryString)
-      .digest("hex");
-
-    // 3. Appel authentifié au compte Binance
-    const accountResponse = await fetch(
-      `${baseUrl}/api/v3/account?${queryString}&signature=${signature}`,
-      {
-        method: "GET",
-        headers: {
-          "X-MBX-APIKEY": apiKey,
-        },
-        cache: "no-store",
-      }
-    );
-
-    const accountData = await accountResponse.json();
-
-    if (!accountResponse.ok) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: "Binance rejected the account request.",
-          status: accountResponse.status,
-          response: accountData,
-        },
-        { status: accountResponse.status }
-      );
-    }
-
-    // 4. Retourner uniquement les informations nécessaires
-    return NextResponse.json({
-      ok: true,
-      account: accountData,
-    });
-  } catch (error) {
-    return NextResponse.json(
-      {
+      results.push({
+        name: endpoint.name,
+        url: endpoint.url,
+        status: response.status,
+        ok: response.ok,
+        response: data,
+        responseTimeMs: Date.now() - startedAt,
+      });
+    } catch (error) {
+      results.push({
+        name: endpoint.name,
+        url: endpoint.url,
+        status: null,
         ok: false,
         error:
           error instanceof Error
             ? error.message
-            : "Unknown Binance connection error.",
-      },
-      { status: 500 }
-    );
+            : "Unknown connection error",
+        responseTimeMs: Date.now() - startedAt,
+      });
+    }
   }
+
+  return NextResponse.json({
+    ok: true,
+    testedFrom: "Vercel",
+    results,
+  });
 }
