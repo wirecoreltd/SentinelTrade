@@ -1,3 +1,5 @@
+export const preferredRegion = "fra1";
+
 import { NextResponse } from "next/server";
 import crypto from "crypto";
 
