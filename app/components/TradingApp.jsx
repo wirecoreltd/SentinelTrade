@@ -1460,7 +1460,7 @@ function Dossier({ setTab, setPrefillCalc }) {
           <button
             onClick={() => {
               setPrefillCalc({
-                entry: dossier.price,
+                entry: dossierDisplayPrice,
                 stop: dossier.levelsDirection === "baissier" ? dossier.atrStopShort : dossier.atrStop,
                 takeProfit: dossier.takeProfit,
                 support: dossier.support,
@@ -1497,7 +1497,7 @@ function Dossier({ setTab, setPrefillCalc }) {
   );
 }
 
-const WATCHLIST = [
+const CRYPTO_WATCHLIST = [
   { type: "crypto", query: "bitcoin", label: "Bitcoin (BTC)" },
   { type: "crypto", query: "ethereum", label: "Ethereum (ETH)" },
   { type: "crypto", query: "solana", label: "Solana (SOL)" },
@@ -1506,6 +1506,9 @@ const WATCHLIST = [
   { type: "crypto", query: "cardano", label: "Cardano (ADA)" },
   { type: "crypto", query: "dogecoin", label: "Dogecoin (DOGE)" },
   { type: "crypto", query: "avalanche-2", label: "Avalanche (AVAX)" },
+];
+
+const OTHER_WATCHLIST = [
   { type: "fx", query: "XAU", label: "Or (XAU/USD)" },
   { type: "fx", query: "XAG", label: "Argent (XAG/USD)" },
   { type: "fx", query: "EUR", label: "EUR/USD" },
@@ -1811,7 +1814,7 @@ function LongTermInvestissement({ onSendToCalculator }) {
 
               <button
                 onClick={() => onSendToCalculator({
-                  entry: r.price,
+                  entry: displayPrice,
                   stop: h.stop,
                   takeProfit: h.target,
                   support: h.support,
@@ -1953,13 +1956,13 @@ function splitLabel(label) {
   return { name: label, ticker: "" };
 }
 
-function TopMarkets({ onSendToCalculator, onGoToHistorique }) {
+function TopMarkets({ watchlist, onSendToCalculator, onGoToHistorique }) {
   const [loading, setLoading] = useState(false);
-  const [progress, setProgress] = useState({ done: 0, total: WATCHLIST.length });
+  const [progress, setProgress] = useState({ done: 0, total: watchlist.length });
   const [results, setResults] = useState([]);
   const [error, setError] = useState("");
   const [openTrades, setOpenTrades] = useState([]);
-  const cryptoIds = WATCHLIST.filter((w) => w.type === "crypto").map((w) => w.query);
+  const cryptoIds = watchlist.filter((w) => w.type === "crypto").map((w) => w.query);
   const livePrices = useBinanceLivePrices(cryptoIds);
 
   useEffect(() => {
@@ -1970,33 +1973,33 @@ function TopMarkets({ onSendToCalculator, onGoToHistorique }) {
     setLoading(true);
     setError("");
     setResults([]);
-    setProgress({ done: 0, total: WATCHLIST.length });
+    setProgress({ done: 0, total: watchlist.length });
     setOpenTrades(getOpenTrades(loadHistory()));
 
-    const cryptoIds = WATCHLIST.filter((w) => w.type === "crypto").map((w) => w.query);
+    const cryptoIds = watchlist.filter((w) => w.type === "crypto").map((w) => w.query);
     const marketsMeta = await fetchCoinGeckoMarketsByIds(cryptoIds);
     const metaMap = {};
     (marketsMeta || []).forEach((m) => {
       metaMap[m.id] = m;
     });
 
-    const settled = new Array(WATCHLIST.length);
+    const settled = new Array(watchlist.length);
     let doneCount = 0;
     const markDone = (idx, value) => {
       settled[idx] = value;
       doneCount += 1;
-      setProgress({ done: doneCount, total: WATCHLIST.length });
+      setProgress({ done: doneCount, total: watchlist.length });
     };
 
     const fastIndexes = [];
     const fxIndexes = [];
-    WATCHLIST.forEach((item, idx) => {
+    watchlist.forEach((item, idx) => {
       if (item.type === "fx" && !isMetal(item.query)) fxIndexes.push(idx);
       else fastIndexes.push(idx);
     });
 
     const runOne = async (idx, attempt = 0) => {
-      const item = WATCHLIST[idx];
+      const item = watchlist[idx];
       try {
         const r = await runMarketAnalysis(item.type, item.query);
         const meta = item.type === "crypto" ? metaMap[item.query] : null;
@@ -2043,7 +2046,7 @@ function TopMarkets({ onSendToCalculator, onGoToHistorique }) {
       setError("Le scan a échoué pour tous les marchés — réessaie plus tard.");
     }
     setLoading(false);
-  }, []);
+  }, [watchlist]);
 
   useEffect(() => {
     runScan();
@@ -2053,7 +2056,7 @@ function TopMarkets({ onSendToCalculator, onGoToHistorique }) {
   return (
     <div>
       <div style={{ fontSize: 13, color: MUTED, marginBottom: 16 }}>
-        Scan classé de 15 marchés (8 cryptos, or, argent, 5 devises majeures) avec la même
+        Scan classé de {watchlist.length} marchés avec la même
         analyse que le Dossier — tendances 7j/30j/90j + sentiment des actualités. Pour un actif
         où tu as déjà une position ouverte, le badge devient une recommandation de gestion de
         position (renforcer, conserver, sécuriser, clôturer…) basée sur ton historique. Clique
@@ -2525,11 +2528,12 @@ function Calculateur({ prefill }) {
 }
 
 export default function TradingApp() {
-  const [tab, setTab] = useState("top15");
+  const [tab, setTab] = useState("top15-crypto");
   const [prefillCalc, setPrefillCalc] = useState(null);
 
   const tabs = [
-    { id: "top15", label: "Top 15", icon: ListOrdered },
+    { id: "top15-crypto", label: "Top Crypto", icon: ListOrdered },
+    { id: "top15-autres", label: "Top Devises & Or", icon: ListOrdered },
     { id: "longterm", label: "📈 Long terme", icon: CalendarRange },
     { id: "dossier", label: "Dossier", icon: FileText },
     { id: "calc", label: "Calculateur", icon: Calculator },
@@ -2577,8 +2581,19 @@ export default function TradingApp() {
           ))}
         </div>
 
-        {tab === "top15" && (
+        {tab === "top15-crypto" && (
           <TopMarkets
+            watchlist={CRYPTO_WATCHLIST}
+            onSendToCalculator={(prefill) => {
+              setPrefillCalc(prefill);
+              setTab("calc");
+            }}
+            onGoToHistorique={() => setTab("historique")}
+          />
+        )}
+        {tab === "top15-autres" && (
+          <TopMarkets
+            watchlist={OTHER_WATCHLIST}
             onSendToCalculator={(prefill) => {
               setPrefillCalc(prefill);
               setTab("calc");
