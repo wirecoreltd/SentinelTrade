@@ -2181,7 +2181,8 @@ function TopMarkets({ onSendToCalculator, onGoToHistorique }) {
                       <div style={{ fontWeight: 700, fontSize: 14 }}>{name}</div>
                       {ticker && <div style={{ fontSize: 11, color: MUTED, textTransform: "uppercase" }}>{ticker}</div>}
                       <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginTop: 4 }}>
-                        <span style={{ fontSize: 13, fontWeight: 600 }}>${formatPrice(r.price)}</span>
+                        <span style={{ fontSize: 13, fontWeight: 600 }}>${formatPrice(displayPrice)}</span>
+                          {isLive && <LiveBadge />}
                         {hasChange && (
                           <span style={{ fontSize: 11, fontWeight: 700, color: r.change24h >= 0 ? POS : NEG }}>
                             {r.change24h >= 0 ? "+" : ""}
