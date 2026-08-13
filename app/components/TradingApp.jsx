@@ -1172,18 +1172,28 @@ async function fetchCalculatorCandles({ assetType, rawQuery, rangeKey }) {
   if (!rawQuery) throw new Error("Actif inconnu");
 
   if (assetType === "crypto") {
-    const days = CRYPTO_DAYS_BY_RANGE[rangeKey];
-    let candles = await fetchCoinGeckoOHLC(rawQuery.toLowerCase(), days);
+  const symbol = rawQuery.toUpperCase();
 
-    // CoinGecko does not provide a native 5-day OHLC window. We request 7 days
-    // and keep only the latest 5 days so the UI label and data match.
-    if (rangeKey === "5j" && candles.length > 0) {
-      const cutoff = Date.now() - 5 * 24 * 60 * 60 * 1000;
-      candles = candles.filter((c) => c.date >= cutoff);
+  const response = await fetch(
+    `/api/binance/klines?symbol=${encodeURIComponent(symbol)}&range=${encodeURIComponent(rangeKey)}`,
+    {
+      cache: "no-store",
     }
+  );
 
-    return { candles, note: null };
+  const data = await response.json();
+
+  if (!response.ok || !data.ok) {
+    throw new Error(
+      data?.error || "Impossible de récupérer les données Binance."
+    );
   }
+
+  return {
+    candles: data.candles || [],
+    note: null,
+  };
+}
 
   if (assetType === "matieres") {
     throw new Error("Historique indisponible gratuitement pour l'or/l'argent — seul le prix en temps réel est affiché ailleurs dans l'appli.");
