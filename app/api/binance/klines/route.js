@@ -9,6 +9,7 @@ const INTERVALS = {
   "5j": "1h",
   "1m": "4h",
   "3m": "1d",
+  "6m": "1d",
 };
 
 const LIMITS = {
@@ -16,6 +17,7 @@ const LIMITS = {
   "5j": 120,
   "1m": 180,
   "3m": 90,
+  "6m": 180,
 };
 
 export async function GET(request) {
