@@ -1090,6 +1090,13 @@ const BINANCE_SYMBOL_MAP = {
   cardano: "adausdt",
   dogecoin: "dogeusdt",
   "avalanche-2": "avaxusdt",
+  polkadot: "dotusdt",
+  chainlink: "linkusdt",
+  tron: "trxusdt",
+  "matic-network": "maticusdt",
+  litecoin: "ltcusdt",
+  "shiba-inu": "shibusdt",
+  uniswap: "uniusdt",
 };
 
 // ids : tableau d'ids CoinGecko (ex: ["bitcoin", "ethereum"]).
@@ -1506,6 +1513,13 @@ const CRYPTO_WATCHLIST = [
   { type: "crypto", query: "cardano", label: "Cardano (ADA)" },
   { type: "crypto", query: "dogecoin", label: "Dogecoin (DOGE)" },
   { type: "crypto", query: "avalanche-2", label: "Avalanche (AVAX)" },
+  { type: "crypto", query: "polkadot", label: "Polkadot (DOT)" },
+  { type: "crypto", query: "chainlink", label: "Chainlink (LINK)" },
+  { type: "crypto", query: "tron", label: "Tron (TRX)" },
+  { type: "crypto", query: "matic-network", label: "Polygon (MATIC)" },
+  { type: "crypto", query: "litecoin", label: "Litecoin (LTC)" },
+  { type: "crypto", query: "shiba-inu", label: "Shiba Inu (SHIB)" },
+  { type: "crypto", query: "uniswap", label: "Uniswap (UNI)" },
 ];
 
 const OTHER_WATCHLIST = [
@@ -1516,6 +1530,14 @@ const OTHER_WATCHLIST = [
   { type: "fx", query: "JPY", label: "JPY/USD" },
   { type: "fx", query: "CHF", label: "CHF/USD" },
   { type: "fx", query: "CAD", label: "CAD/USD" },
+  { type: "fx", query: "AUD", label: "AUD/USD" },
+  { type: "fx", query: "NZD", label: "NZD/USD" },
+  { type: "fx", query: "CNY", label: "CNY/USD" },
+  { type: "fx", query: "INR", label: "INR/USD" },
+  { type: "fx", query: "MXN", label: "MXN/USD" },
+  { type: "fx", query: "SEK", label: "SEK/USD" },
+  { type: "fx", query: "NOK", label: "NOK/USD" },
+  { type: "fx", query: "SGD", label: "SGD/USD" },
 ];
 
 const LONG_TERM_WATCHLIST = [
