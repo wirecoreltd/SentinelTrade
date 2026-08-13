@@ -1172,7 +1172,41 @@ async function fetchCalculatorCandles({ assetType, rawQuery, rangeKey }) {
   if (!rawQuery) throw new Error("Actif inconnu");
 
   if (assetType === "crypto") {
-  const symbol = rawQuery.toUpperCase();
+  const symbolMap = {
+    bitcoin: "BTCUSDT",
+    ethereum: "ETHUSDT",
+    binancecoin: "BNBUSDT",
+    solana: "SOLUSDT",
+    ripple: "XRPUSDT",
+    cardano: "ADAUSDT",
+    dogecoin: "DOGEUSDT",
+    avalanche: "AVAXUSDT",
+    polkadot: "DOTUSDT",
+    chainlink: "LINKUSDT",
+    polygon: "POLUSDT",
+    "matic-network": "POLUSDT",
+    litecoin: "LTCUSDT",
+    cosmos: "ATOMUSDT",
+    uniswap: "UNIUSDT",
+    stellar: "XLMUSDT",
+    tron: "TRXUSDT",
+    near: "NEARUSDT",
+    aptos: "APTUSDT",
+    arbitrum: "ARBUSDT",
+    optimism: "OPUSDT",
+  };
+
+  const raw = rawQuery.toLowerCase().trim();
+
+  const symbol = raw.endsWith("usdt")
+    ? raw.toUpperCase()
+    : symbolMap[raw];
+
+  if (!symbol) {
+    throw new Error(
+      `Symbole Binance introuvable pour "${rawQuery}".`
+    );
+  }
 
   const response = await fetch(
     `/api/binance/klines?symbol=${encodeURIComponent(symbol)}&range=${encodeURIComponent(rangeKey)}`,
