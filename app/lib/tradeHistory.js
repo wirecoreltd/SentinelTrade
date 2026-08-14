@@ -3,7 +3,9 @@
 // ============================================================================
 // Historique des trades "pris" (marqués manuellement depuis le Calculateur)
 // + garde-fous de discipline (surexposition sur un même actif, limite de
-// risque cumulé par jour, limite du nombre de trades par jour).
+// risque cumulé par jour, limite du nombre de trades par jour)
+// + suivi de performance réel (P&L calculé à partir d'un prix de sortie
+// saisi, pas d'une déclaration "gagné/perdu" manuelle).
 //
 // Stockage : localStorage, donc propre à cet appareil/navigateur. Pas de
 // backend — si tu utilises l'appli sur plusieurs appareils, l'historique
@@ -21,6 +23,10 @@ export const DEFAULT_SETTINGS = {
 
 function isBrowser() {
   return typeof window !== "undefined";
+}
+
+function isFiniteNum(v) {
+  return typeof v === "number" && Number.isFinite(v);
 }
 
 function safeParse(json, fallback) {
@@ -75,24 +81,45 @@ export function addTrade(trade) {
     dateKey: toLocalDateKey(now),
     status: "ouvert", // "ouvert" | "gagné" | "perdu" | "clôturé"
     closedAt: null,
+    exitPrice: null,
     realizedPnL: null,
+    realizedPnLPct: null,
     ...trade,
   };
   saveHistory([entry, ...list]);
   return entry;
 }
 
-export function updateTradeStatus(id, status, realizedPnL = null) {
-  const next = loadHistory().map((t) =>
-    t.id === id
-      ? {
-          ...t,
-          status,
-          closedAt: new Date().toISOString(),
-          realizedPnL: realizedPnL != null ? realizedPnL : t.realizedPnL,
-        }
-      : t
-  );
+// Clôture un trade. Si `exitPrice` est fourni et que le trade a une
+// quantité/entrée valides, le P&L réel est calculé à partir du prix de
+// sortie (pas déclaré à la main) : on ne fait plus confiance à un simple
+// bouton "Gagné"/"Perdu" pour mesurer la performance.
+// `status` reste explicite ("gagné" | "perdu" | "clôturé") pour couvrir le
+// cas d'une clôture sans résultat chiffré (ex: annulation, jamais entré).
+export function updateTradeStatus(id, status, { exitPrice = null } = {}) {
+  const next = loadHistory().map((t) => {
+    if (t.id !== id) return t;
+
+    let realizedPnL = t.realizedPnL;
+    let realizedPnLPct = t.realizedPnLPct;
+
+    if (exitPrice != null && isFiniteNum(exitPrice) && isFiniteNum(t.entry) && isFiniteNum(t.quantity)) {
+      const isLong = t.direction !== "short";
+      realizedPnL = isLong
+        ? t.quantity * (exitPrice - t.entry)
+        : t.quantity * (t.entry - exitPrice);
+      realizedPnLPct = isFiniteNum(t.invested) && t.invested > 0 ? (realizedPnL / t.invested) * 100 : null;
+    }
+
+    return {
+      ...t,
+      status,
+      closedAt: new Date().toISOString(),
+      exitPrice: exitPrice != null ? exitPrice : t.exitPrice ?? null,
+      realizedPnL,
+      realizedPnLPct,
+    };
+  });
   saveHistory(next);
   return next;
 }
@@ -103,7 +130,7 @@ export function deleteTrade(id) {
   return next;
 }
 
-// ---------- Lecture / stats ----------
+// ---------- Lecture / stats de discipline (existant) ----------
 
 export function getTodayTrades(history, dateKey = toLocalDateKey()) {
   return history.filter((t) => t.dateKey === dateKey);
@@ -129,7 +156,78 @@ export function exposureByType(history) {
   return map;
 }
 
-// ---------- Garde-fous ----------
+// ---------- Stats de performance (nouveau) ----------
+//
+// Ne prend en compte QUE les trades clôturés avec un P&L réellement calculé
+// (realizedPnL non-null), donc jamais un trade "clôturé" sans prix de sortie.
+// C'est volontaire : mélanger des clôtures sans résultat chiffré fausserait
+// le win-rate.
+export function getStats(history) {
+  const closed = history.filter(
+    (t) => (t.status === "gagné" || t.status === "perdu") && isFiniteNum(t.realizedPnL)
+  );
+
+  const wins = closed.filter((t) => t.status === "gagné");
+  const losses = closed.filter((t) => t.status === "perdu");
+
+  const winRate = closed.length ? (wins.length / closed.length) * 100 : null;
+  const totalPnL = closed.reduce((sum, t) => sum + t.realizedPnL, 0);
+  const avgPnLPct = closed.length
+    ? closed.reduce((sum, t) => sum + (isFiniteNum(t.realizedPnLPct) ? t.realizedPnLPct : 0), 0) / closed.length
+    : null;
+
+  // R:R réellement obtenu sur les trades gagnants, comparé au risque
+  // planifié à l'entrée (riskAmount). Permet de voir si tu sors trop tôt
+  // par rapport à ton plan initial.
+  const realizedRRs = wins
+    .filter((t) => isFiniteNum(t.riskAmount) && t.riskAmount > 0 && isFiniteNum(t.realizedPnL))
+    .map((t) => t.realizedPnL / t.riskAmount);
+  const avgRealizedRR = realizedRRs.length
+    ? realizedRRs.reduce((a, b) => a + b, 0) / realizedRRs.length
+    : null;
+
+  // Win-rate par verdict du moteur d'analyse au moment de l'entrée —
+  // répond à "est-ce que 'haussier' gagne vraiment plus souvent que
+  // 'mitigé' avec mon système ?"
+  const byVerdict = {};
+  ["haussier", "baissier", "mitigé"].forEach((v) => {
+    const group = closed.filter((t) => t.verdict === v);
+    const groupWins = group.filter((t) => t.status === "gagné");
+    byVerdict[v] = {
+      total: group.length,
+      wins: groupWins.length,
+      winRate: group.length ? (groupWins.length / group.length) * 100 : null,
+    };
+  });
+
+  // Win-rate par actif — pour repérer un marché qui performe mal avec ton
+  // système, même si le nombre de trades par actif reste souvent faible.
+  const bySymbol = {};
+  closed.forEach((t) => {
+    const key = t.symbol || "—";
+    if (!bySymbol[key]) bySymbol[key] = { total: 0, wins: 0 };
+    bySymbol[key].total += 1;
+    if (t.status === "gagné") bySymbol[key].wins += 1;
+  });
+  Object.keys(bySymbol).forEach((key) => {
+    const g = bySymbol[key];
+    g.winRate = g.total ? (g.wins / g.total) * 100 : null;
+  });
+
+  return {
+    totalClosed: closed.length,
+    wins: wins.length,
+    losses: losses.length,
+    winRate,
+    totalPnL,
+    avgPnLPct,
+    avgRealizedRR,
+    byVerdict,
+    bySymbol,
+  };
+}
+
+// ---------- Garde-fous (existant, inchangé) ----------
 // Renvoie un tableau de messages d'avertissement (vide = rien à signaler)
 // pour un trade candidat, sans jamais bloquer : c'est à toi de décider si
 // tu confirmes quand même.
