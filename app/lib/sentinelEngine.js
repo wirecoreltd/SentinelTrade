@@ -87,6 +87,7 @@ function calculateTrendScore(data) {
   const warnings = [];
 
   const {
+    currentPrice,
     ema20,
     ema50,
     adx,
@@ -97,16 +98,22 @@ function calculateTrendScore(data) {
 
   const direction = structure?.direction || structure?.regime;
 
-  // EMA alignment
-  if (isFiniteNumber(ema20) && isFiniteNumber(ema50)) {
-    if (direction === "haussier" && ema20 > ema50) {
+  // EMA alignment — même règle que le moteur principal (prix + EMA20 + EMA50)
+  if (isFiniteNumber(currentPrice) && isFiniteNumber(ema20) && isFiniteNumber(ema50)) {
+    if (direction === "haussier" && currentPrice > ema20 && ema20 > ema50) {
       score += 5;
-      reasons.push("EMA20 above EMA50");
-    } else if (direction === "baissier" && ema20 < ema50) {
+      reasons.push("Price above EMA20, EMA20 above EMA50 (full alignment)");
+    } else if (direction === "baissier" && currentPrice < ema20 && ema20 < ema50) {
       score += 5;
-      reasons.push("EMA20 below EMA50");
-    } else {
+      reasons.push("Price below EMA20, EMA20 below EMA50 (full alignment)");
+    } else if (
+      (direction === "haussier" && ema20 > ema50) ||
+      (direction === "baissier" && ema20 < ema50)
+    ) {
       score += 2;
+      warnings.push("EMA order confirms trend but current price has diverged from EMA20");
+    } else {
+      score += 1;
       warnings.push("EMA alignment conflicts with structure");
     }
   }
