@@ -261,12 +261,32 @@ async function fetchNewsSentiment(query) {
 
       const POS_WORDS = ["surge", "rally", "gain", "bullish", "soar", "jump", "rise", "beat", "strong", "growth", "upgrade", "hausse", "record"];
       const NEG_WORDS = ["drop", "fall", "plunge", "bearish", "crash", "decline", "loss", "weak", "cut", "downgrade", "concern", "fear", "baisse", "chute"];
+      const NEGATION_WORDS = ["not", "no", "never", "without", "pas", "aucun", "sans", "ni"];
+      const NEGATION_WINDOW = 3; // mots regardés avant le mot-clé
+
+      function tokenize(text) {
+        return text.toLowerCase().match(/[a-zà-ÿ']+/g) || [];
+      }
+
+      function scoreArticleText(text) {
+        const words = tokenize(text);
+        let s = 0;
+        words.forEach((word, idx) => {
+          const isPos = POS_WORDS.includes(word);
+          const isNeg = NEG_WORDS.includes(word);
+          if (!isPos && !isNeg) return;
+          const windowStart = Math.max(0, idx - NEGATION_WINDOW);
+          const negated = words.slice(windowStart, idx).some((w) => NEGATION_WORDS.includes(w));
+          if (isPos) s += negated ? -1 : 1;
+          if (isNeg) s += negated ? 1 : -1;
+        });
+        return s;
+      }
 
       let score = 0;
       for (const a of articles) {
-        const text = `${a.title || ""} ${a.description || ""}`.toLowerCase();
-        for (const w of POS_WORDS) if (text.includes(w)) score += 1;
-        for (const w of NEG_WORDS) if (text.includes(w)) score -= 1;
+        const text = `${a.title || ""} ${a.description || ""}`;
+        score += scoreArticleText(text);
       }
 
       let label = "mitigé";
@@ -808,8 +828,8 @@ async function runMarketAnalysis(type, query) {
     else bull += 1;
   }
 
-  if (news?.label === "positif") bull += 1;
-  else if (news?.label === "négatif") bear += 1;
+  if (news?.label === "positif") bull += 0.5;
+  else if (news?.label === "négatif") bear += 0.5;
 
   let verdict = "mitigé";
   if (bull - bear >= 2) verdict = "haussier";
