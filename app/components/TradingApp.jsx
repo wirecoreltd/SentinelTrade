@@ -2130,6 +2130,12 @@ function TopMarkets({ watchlist, onSendToCalculator, onGoToHistorique }) {
       settled[idx] = value;
       doneCount += 1;
       setProgress({ done: doneCount, total: watchlist.length });
+
+      // Affiche les résultats au fur et à mesure au lieu d'attendre le scan complet
+      const soFar = settled.filter(Boolean);
+      const ok = soFar.filter((r) => !r.error).sort((a, b) => b.score - a.score);
+      const failed = soFar.filter((r) => r.error);
+      setResults([...ok, ...failed]);
     };
 
     const fastIndexes = [];
@@ -2179,11 +2185,9 @@ function TopMarkets({ watchlist, onSendToCalculator, onGoToHistorique }) {
 
     await Promise.all([runFast(), runFx()]);
 
-    const ok = settled.filter((r) => !r.error);
-    const failed = settled.filter((r) => r.error);
-    ok.sort((a, b) => b.score - a.score);
-    setResults([...ok, ...failed]);
     setScanTime(Date.now());
+    const ok = settled.filter(Boolean).filter((r) => !r.error);
+    const failed = settled.filter(Boolean).filter((r) => r.error);
     if (failed.length > 0 && ok.length === 0) {
       setError("Le scan a échoué pour tous les marchés — réessaie plus tard.");
     }
