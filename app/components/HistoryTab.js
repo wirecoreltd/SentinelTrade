@@ -2,15 +2,17 @@
 
 // ============================================================================
 // Onglet "Historique" — affiche les trades marqués comme pris depuis le
-// Calculateur, avec un résumé du jour (nb de trades, risque cumulé) et la
-// possibilité de clôturer (gagné/perdu/clôturé) ou supprimer une entrée.
+// Calculateur, avec un résumé du jour (nb de trades, risque cumulé), les
+// stats de performance réelle (win-rate, R:R réalisé) et la possibilité de
+// clôturer (avec un prix de sortie réel, ou sans résultat) ou supprimer une
+// entrée.
 //
-// La logique de stockage/garde-fous vit dans ../lib/tradeHistory.js — ce
-// fichier ne fait que l'affichage.
+// La logique de stockage/garde-fous/stats vit dans ../lib/tradeHistory.js —
+// ce fichier ne fait que l'affichage.
 // ============================================================================
 
 import { useEffect, useMemo, useState } from "react";
-import { Trash2, TrendingUp, TrendingDown, CheckCircle2, XCircle, CircleDot } from "lucide-react";
+import { Trash2, TrendingUp, TrendingDown, CircleDot, Check, X } from "lucide-react";
 import { NAVY, PANEL, ACCENT, TEXT, MUTED, LINE, POS, NEG, AMBER } from "../lib/theme";
 import { formatPrice } from "../lib/format";
 import {
@@ -21,6 +23,7 @@ import {
   getTodayTrades,
   todayOpenRisk,
   toLocalDateKey,
+  getStats,
 } from "../lib/tradeHistory";
 
 const STATUS_LABEL = {
@@ -70,11 +73,75 @@ function formatDate(iso) {
   });
 }
 
-function TradeCard({ trade, onClose, onDelete }) {
+function StatRow({ label, value, color }) {
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", padding: "5px 0" }}>
+      <span style={{ fontSize: 12, color: MUTED }}>{label}</span>
+      <span style={{ fontSize: 12, fontWeight: 700, color: color || TEXT }}>{value}</span>
+    </div>
+  );
+}
+
+function StatsSummary({ stats }) {
+  if (!stats || stats.totalClosed === 0) {
+    return (
+      <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 14, marginBottom: 16, fontSize: 12, color: MUTED }}>
+        Aucun trade clôturé avec un prix de sortie pour l'instant — les stats de performance apparaîtront ici une fois que tu auras clôturé des trades avec un résultat chiffré.
+      </div>
+    );
+  }
+
+  const winRateColor = stats.winRate >= 50 ? POS : NEG;
+  const verdictEntries = Object.entries(stats.byVerdict).filter(([, v]) => v.total > 0);
+
+  return (
+    <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 14, marginBottom: 16 }}>
+      <div style={{ fontSize: 11, color: MUTED, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 8 }}>
+        Performance réelle ({stats.totalClosed} trade{stats.totalClosed > 1 ? "s" : ""} clôturé{stats.totalClosed > 1 ? "s" : ""})
+      </div>
+
+      <StatRow label="Win-rate global" value={`${stats.winRate.toFixed(0)}% (${stats.wins}G / ${stats.losses}P)`} color={winRateColor} />
+      <StatRow label="P&L cumulé" value={`${stats.totalPnL >= 0 ? "+" : ""}${stats.totalPnL.toFixed(2)} €`} color={stats.totalPnL >= 0 ? POS : NEG} />
+      <StatRow label="P&L moyen / trade" value={`${stats.avgPnLPct >= 0 ? "+" : ""}${stats.avgPnLPct.toFixed(1)}% de la mise`} color={stats.avgPnLPct >= 0 ? POS : NEG} />
+      {stats.avgRealizedRR != null && (
+        <StatRow label="R:R moyen réalisé (trades gagnants)" value={`${stats.avgRealizedRR.toFixed(2)}:1`} />
+      )}
+
+      {verdictEntries.length > 0 && (
+        <div style={{ marginTop: 8, paddingTop: 8, borderTop: `1px solid ${LINE}` }}>
+          <div style={{ fontSize: 10, color: MUTED, textTransform: "uppercase", marginBottom: 4 }}>Win-rate par verdict</div>
+          {verdictEntries.map(([verdict, v]) => (
+            <StatRow
+              key={verdict}
+              label={`${verdict} (${v.total})`}
+              value={v.winRate != null ? `${v.winRate.toFixed(0)}%` : "—"}
+              color={v.winRate != null ? (v.winRate >= 50 ? POS : NEG) : MUTED}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TradeCard({ trade, onCloseWithResult, onCloseNoResult, onDelete }) {
+  const [closing, setClosing] = useState(false);
+  const [exitInput, setExitInput] = useState("");
+
   const isLong = trade.direction !== "short";
   const DirIcon = isLong ? TrendingUp : TrendingDown;
   const dirColor = isLong ? POS : NEG;
   const isOpen = trade.status === "ouvert";
+
+  const parsedExit = parseFloat(exitInput);
+  const exitValid = Number.isFinite(parsedExit) && parsedExit > 0;
+
+  const confirmExit = () => {
+    if (!exitValid) return;
+    onCloseWithResult(trade.id, parsedExit);
+    setClosing(false);
+    setExitInput("");
+  };
 
   return (
     <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 14 }}>
@@ -121,7 +188,7 @@ function TradeCard({ trade, onClose, onDelete }) {
         </div>
       </div>
 
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: isOpen ? 10 : 0 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: isOpen || trade.exitPrice != null ? 10 : 0 }}>
         <span style={{ fontSize: 11, color: MUTED }}>
           Mise {trade.invested?.toFixed(2)} € · Risque{" "}
           <span style={{ color: NEG, fontWeight: 700 }}>{trade.riskAmount != null ? `${trade.riskAmount.toFixed(2)} €` : "—"}</span>
@@ -129,92 +196,145 @@ function TradeCard({ trade, onClose, onDelete }) {
         {trade.realizedPnL != null && (
           <span style={{ fontSize: 12, fontWeight: 700, color: trade.realizedPnL >= 0 ? POS : NEG }}>
             {trade.realizedPnL >= 0 ? "+" : ""}
-            {trade.realizedPnL.toFixed(2)} €
+            {trade.realizedPnL.toFixed(2)} € ({trade.realizedPnLPct >= 0 ? "+" : ""}
+            {trade.realizedPnLPct?.toFixed(1)}%)
           </span>
         )}
       </div>
 
-      {isOpen ? (
-        <div style={{ display: "flex", gap: 6 }}>
-          <button
-            onClick={() => onClose(trade.id, "gagné")}
-            style={{
-              flex: 1,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: 4,
-              background: "rgba(61,214,140,0.12)",
-              border: `1px solid ${POS}`,
-              color: POS,
-              borderRadius: 8,
-              padding: "7px 0",
-              fontSize: 11,
-              fontWeight: 700,
-              cursor: "pointer",
-            }}
-          >
-            <CheckCircle2 size={12} /> Gagné
-          </button>
-          <button
-            onClick={() => onClose(trade.id, "perdu")}
-            style={{
-              flex: 1,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: 4,
-              background: "rgba(255,103,103,0.12)",
-              border: `1px solid ${NEG}`,
-              color: NEG,
-              borderRadius: 8,
-              padding: "7px 0",
-              fontSize: 11,
-              fontWeight: 700,
-              cursor: "pointer",
-            }}
-          >
-            <XCircle size={12} /> Perdu
-          </button>
-          <button
-            onClick={() => onClose(trade.id, "clôturé")}
-            style={{
-              flex: 1,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: 4,
-              background: "transparent",
-              border: `1px solid ${LINE}`,
-              color: MUTED,
-              borderRadius: 8,
-              padding: "7px 0",
-              fontSize: 11,
-              fontWeight: 700,
-              cursor: "pointer",
-            }}
-          >
-            <CircleDot size={12} /> Clôturé
-          </button>
-          <button
-            onClick={() => onDelete(trade.id)}
-            title="Supprimer"
-            style={{
-              width: 32,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              background: "transparent",
-              border: `1px solid ${LINE}`,
-              color: MUTED,
-              borderRadius: 8,
-              cursor: "pointer",
-            }}
-          >
-            <Trash2 size={12} />
-          </button>
+      {trade.exitPrice != null && (
+        <div style={{ fontSize: 11, color: MUTED, marginBottom: isOpen ? 10 : 0 }}>
+          Sortie à {formatPrice(trade.exitPrice)}
         </div>
-      ) : (
+      )}
+
+      {isOpen && (
+        <>
+          {closing ? (
+            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <input
+                value={exitInput}
+                onChange={(e) => setExitInput(e.target.value)}
+                placeholder="Prix de sortie réel"
+                inputMode="decimal"
+                autoFocus
+                style={{
+                  flex: 1,
+                  background: NAVY,
+                  border: `1px solid ${LINE}`,
+                  borderRadius: 8,
+                  padding: "8px 10px",
+                  color: TEXT,
+                  fontSize: 13,
+                }}
+              />
+              <button
+                onClick={confirmExit}
+                disabled={!exitValid}
+                style={{
+                  width: 34,
+                  height: 34,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  background: exitValid ? "rgba(61,214,140,0.14)" : "transparent",
+                  border: `1px solid ${exitValid ? POS : LINE}`,
+                  color: exitValid ? POS : MUTED,
+                  borderRadius: 8,
+                  cursor: exitValid ? "pointer" : "not-allowed",
+                }}
+                title="Confirmer"
+              >
+                <Check size={14} />
+              </button>
+              <button
+                onClick={() => {
+                  setClosing(false);
+                  setExitInput("");
+                }}
+                style={{
+                  width: 34,
+                  height: 34,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  background: "transparent",
+                  border: `1px solid ${LINE}`,
+                  color: MUTED,
+                  borderRadius: 8,
+                  cursor: "pointer",
+                }}
+                title="Annuler"
+              >
+                <X size={14} />
+              </button>
+            </div>
+          ) : (
+            <div style={{ display: "flex", gap: 6 }}>
+              <button
+                onClick={() => setClosing(true)}
+                style={{
+                  flex: 1,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: 4,
+                  background: "rgba(79,140,255,0.12)",
+                  border: `1px solid ${ACCENT}`,
+                  color: ACCENT,
+                  borderRadius: 8,
+                  padding: "7px 0",
+                  fontSize: 11,
+                  fontWeight: 700,
+                  cursor: "pointer",
+                }}
+              >
+                Clôturer avec résultat
+              </button>
+              <button
+                onClick={() => onCloseNoResult(trade.id)}
+                title="Clôturer sans résultat (annulé, jamais entré...)"
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: 4,
+                  background: "transparent",
+                  border: `1px solid ${LINE}`,
+                  color: MUTED,
+                  borderRadius: 8,
+                  padding: "7px 10px",
+                  fontSize: 11,
+                  fontWeight: 700,
+                  cursor: "pointer",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                <CircleDot size={12} />
+              </button>
+              <button
+                onClick={() => onDelete(trade.id)}
+                title="Supprimer"
+                style={{
+                  width: 32,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  background: "transparent",
+                  border: `1px solid ${LINE}`,
+                  color: MUTED,
+                  borderRadius: 8,
+                  cursor: "pointer",
+                }}
+              >
+                <Trash2 size={12} />
+              </button>
+            </div>
+          )}
+        </>
+      )}
+
+      {!isOpen && (
         <div style={{ display: "flex", justifyContent: "flex-end" }}>
           <button
             onClick={() => onDelete(trade.id)}
@@ -250,8 +370,21 @@ export default function HistoryTab() {
     setSettings(loadSettings());
   }, []);
 
-  const handleClose = (id, status) => {
-    const next = updateTradeStatus(id, status);
+  // Clôture avec résultat : le statut (gagné/perdu) est dérivé du signe du
+  // P&L calculé par tradeHistory.js à partir du prix de sortie saisi — plus
+  // de bouton "Gagné"/"Perdu" à choisir soi-même.
+  const handleCloseWithResult = (id, exitPrice) => {
+    const trade = history.find((t) => t.id === id);
+    if (!trade) return;
+    const isLong = trade.direction !== "short";
+    const pnl = isLong ? exitPrice - trade.entry : trade.entry - exitPrice;
+    const status = pnl >= 0 ? "gagné" : "perdu";
+    const next = updateTradeStatus(id, status, { exitPrice });
+    setHistory(next);
+  };
+
+  const handleCloseNoResult = (id) => {
+    const next = updateTradeStatus(id, "clôturé");
     setHistory(next);
   };
 
@@ -263,6 +396,7 @@ export default function HistoryTab() {
   const todayKey = toLocalDateKey();
   const todayTrades = useMemo(() => getTodayTrades(history, todayKey), [history, todayKey]);
   const openRiskToday = useMemo(() => todayOpenRisk(history, todayKey), [history, todayKey]);
+  const stats = useMemo(() => getStats(history), [history]);
 
   const filtered = useMemo(() => {
     if (filter === "ouvert") return history.filter((t) => t.status === "ouvert");
@@ -297,6 +431,8 @@ export default function HistoryTab() {
         </div>
       )}
 
+      <StatsSummary stats={stats} />
+
       <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
         {[
           { id: "tous", label: "Tous" },
@@ -330,7 +466,13 @@ export default function HistoryTab() {
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           {filtered.map((trade) => (
-            <TradeCard key={trade.id} trade={trade} onClose={handleClose} onDelete={handleDelete} />
+            <TradeCard
+              key={trade.id}
+              trade={trade}
+              onCloseWithResult={handleCloseWithResult}
+              onCloseNoResult={handleCloseNoResult}
+              onDelete={handleDelete}
+            />
           ))}
         </div>
       )}
