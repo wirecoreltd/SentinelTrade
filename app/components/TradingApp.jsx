@@ -1081,35 +1081,55 @@ function CandleChart({ candles, overlays = [], height = 260 }) {
 }
 
 // ─── Prix crypto en temps réel via Binance WebSocket (gratuit, sans clé API) ───
-const BINANCE_SYMBOL_MAP = {
-  bitcoin: "btcusdt",
-  ethereum: "ethusdt",
-  solana: "solusdt",
-  binancecoin: "bnbusdt",
-  ripple: "xrpusdt",
-  cardano: "adausdt",
-  dogecoin: "dogeusdt",
-  "avalanche-2": "avaxusdt",
-  polkadot: "dotusdt",
-  chainlink: "linkusdt",
-  tron: "trxusdt",
-  "matic-network": "maticusdt",
-  litecoin: "ltcusdt",
-  "shiba-inu": "shibusdt",
-  uniswap: "uniusdt",
+//
+// Source unique de vérité pour la correspondance CoinGecko id → symbole
+// Binance. Utilisée à la fois par le WebSocket (prix live, ci-dessous) et par
+// fetchCalculatorCandles (chandeliers REST, plus bas dans le fichier).
+// Avant cette correction, il existait DEUX tables différentes, désynchronisées
+// entre elles :
+//   - "avalanche" au lieu de "avalanche-2" dans la table des chandeliers →
+//     le watchlist utilise "avalanche-2", donc le graphique AVAX ne se
+//     chargeait jamais ("Symbole Binance introuvable").
+//   - "shiba-inu" absent de la table des chandeliers → même bug pour SHIB.
+//   - "matic-network" → "maticusdt" dans la table du prix live, alors que
+//     Binance a délisté la paire MATICUSDT lors du swap MATIC → POL
+//     (septembre 2024) ; la paire active est POLUSDT.
+// Ne plus jamais dupliquer ce mapping ailleurs dans le fichier : tout doit
+// passer par getBinanceSymbol().
+const COINGECKO_TO_BINANCE = {
+  bitcoin: "BTCUSDT",
+  ethereum: "ETHUSDT",
+  solana: "SOLUSDT",
+  binancecoin: "BNBUSDT",
+  ripple: "XRPUSDT",
+  cardano: "ADAUSDT",
+  dogecoin: "DOGEUSDT",
+  "avalanche-2": "AVAXUSDT",
+  polkadot: "DOTUSDT",
+  chainlink: "LINKUSDT",
+  tron: "TRXUSDT",
+  "matic-network": "POLUSDT", // Polygon : MATIC → POL, MATICUSDT délisté sur Binance
+  litecoin: "LTCUSDT",
+  "shiba-inu": "SHIBUSDT",
+  uniswap: "UNIUSDT",
 };
+
+function getBinanceSymbol(coingeckoId) {
+  if (!coingeckoId) return null;
+  return COINGECKO_TO_BINANCE[coingeckoId.toLowerCase()] || null;
+}
 
 // ids : tableau d'ids CoinGecko (ex: ["bitcoin", "ethereum"]).
 // Retourne { [id]: dernierPrix } mis à jour à chaque trade Binance.
 function useBinanceLivePrices(ids) {
   const [prices, setPrices] = useState({});
-  const idsKey = [...new Set(ids.filter((id) => BINANCE_SYMBOL_MAP[id]))].sort().join(",");
+  const idsKey = [...new Set(ids.filter((id) => getBinanceSymbol(id)))].sort().join(",");
 
   useEffect(() => {
     const activeIds = idsKey ? idsKey.split(",") : [];
     if (activeIds.length === 0) return;
 
-    const streams = activeIds.map((id) => `${BINANCE_SYMBOL_MAP[id]}@trade`).join("/");
+    const streams = activeIds.map((id) => `${getBinanceSymbol(id).toLowerCase()}@trade`).join("/");
     let ws;
     let reconnectTimer;
     let cancelled = false;
@@ -1123,7 +1143,9 @@ function useBinanceLivePrices(ids) {
           const symbol = msg?.data?.s?.toLowerCase();
           const price = parseFloat(msg?.data?.p);
           if (!symbol || !Number.isFinite(price)) return;
-          const id = Object.keys(BINANCE_SYMBOL_MAP).find((k) => BINANCE_SYMBOL_MAP[k] === symbol);
+          const id = Object.keys(COINGECKO_TO_BINANCE).find(
+            (k) => getBinanceSymbol(k).toLowerCase() === symbol
+          );
           if (!id) return;
           setPrices((prev) => (prev[id] === price ? prev : { ...prev, [id]: price }));
         } catch {
@@ -1172,62 +1194,39 @@ async function fetchCalculatorCandles({ assetType, rawQuery, rangeKey }) {
   if (!rawQuery) throw new Error("Actif inconnu");
 
   if (assetType === "crypto") {
-  const symbolMap = {
-    bitcoin: "BTCUSDT",
-    ethereum: "ETHUSDT",
-    binancecoin: "BNBUSDT",
-    solana: "SOLUSDT",
-    ripple: "XRPUSDT",
-    cardano: "ADAUSDT",
-    dogecoin: "DOGEUSDT",
-    avalanche: "AVAXUSDT",
-    polkadot: "DOTUSDT",
-    chainlink: "LINKUSDT",
-    polygon: "POLUSDT",
-    "matic-network": "POLUSDT",
-    litecoin: "LTCUSDT",
-    cosmos: "ATOMUSDT",
-    uniswap: "UNIUSDT",
-    stellar: "XLMUSDT",
-    tron: "TRXUSDT",
-    near: "NEARUSDT",
-    aptos: "APTUSDT",
-    arbitrum: "ARBUSDT",
-    optimism: "OPUSDT",
-  };
+    const raw = rawQuery.toLowerCase().trim();
 
-  const raw = rawQuery.toLowerCase().trim();
+    // Utilise la même source de vérité que le prix live (COINGECKO_TO_BINANCE,
+    // via getBinanceSymbol) au lieu d'une table locale dupliquée — c'était la
+    // cause du bug "graphique introuvable" pour AVAX et SHIB.
+    const symbol = raw.endsWith("usdt") ? raw.toUpperCase() : getBinanceSymbol(raw);
 
-  const symbol = raw.endsWith("usdt")
-    ? raw.toUpperCase()
-    : symbolMap[raw];
-
-  if (!symbol) {
-    throw new Error(
-      `Symbole Binance introuvable pour "${rawQuery}".`
-    );
-  }
-
-  const response = await fetch(
-    `/api/binance/klines?symbol=${encodeURIComponent(symbol)}&range=${encodeURIComponent(rangeKey)}`,
-    {
-      cache: "no-store",
+    if (!symbol) {
+      throw new Error(
+        `Symbole Binance introuvable pour "${rawQuery}".`
+      );
     }
-  );
 
-  const data = await response.json();
-
-  if (!response.ok || !data.ok) {
-    throw new Error(
-      data?.error || "Impossible de récupérer les données Binance."
+    const response = await fetch(
+      `/api/binance/klines?symbol=${encodeURIComponent(symbol)}&range=${encodeURIComponent(rangeKey)}`,
+      {
+        cache: "no-store",
+      }
     );
-  }
 
-  return {
-    candles: data.candles || [],
-    note: null,
-  };
-}
+    const data = await response.json();
+
+    if (!response.ok || !data.ok) {
+      throw new Error(
+        data?.error || "Impossible de récupérer les données Binance."
+      );
+    }
+
+    return {
+      candles: data.candles || [],
+      note: null,
+    };
+  }
 
   if (assetType === "matieres") {
     throw new Error("Historique indisponible gratuitement pour l'or/l'argent — seul le prix en temps réel est affiché ailleurs dans l'appli.");
@@ -1350,7 +1349,7 @@ function Dossier({ setTab, setPrefillCalc }) {
   const [dossier, setDossier] = useState(null);
 
   const dossierLiveId =
-    dossier?.rawQuery && BINANCE_SYMBOL_MAP[dossier.rawQuery.toLowerCase()]
+    dossier?.rawQuery && getBinanceSymbol(dossier.rawQuery)
       ? dossier.rawQuery.toLowerCase()
       : null;
   const dossierLivePrices = useBinanceLivePrices(dossierLiveId ? [dossierLiveId] : []);
