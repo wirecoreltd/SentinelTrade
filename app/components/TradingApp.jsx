@@ -1531,7 +1531,7 @@ function Dossier({ setTab, setPrefillCalc }) {
           <button
             onClick={() => {
               setPrefillCalc({
-                entry: dossierDisplayPrice,
+                entry: dossier.price, // prix de l'analyse, cohérent avec le stop/TP (pas le prix live)
                 stop: dossier.levelsDirection === "baissier" ? dossier.atrStopShort : dossier.atrStop,
                 takeProfit: dossier.takeProfit,
                 support: dossier.support,
@@ -1900,7 +1900,7 @@ function LongTermInvestissement({ onSendToCalculator }) {
 
               <button
                 onClick={() => onSendToCalculator({
-                  entry: displayPrice,
+                  entry: r.price,
                   stop: h.stop,
                   takeProfit: h.target,
                   support: h.support,
@@ -2210,37 +2210,37 @@ function TopMarkets({ watchlist, onSendToCalculator, onGoToHistorique }) {
               }
 
               if (guidance && guidance.key === "renforcer") {
-                const isLong = matchedTrade.direction !== "short";
-                onSendToCalculator({
-                  entry: buyPrice,
-                  stop: isLong ? r.atrStop : r.atrStopShort,
-                  takeProfit: r.takeProfit,
-                  support: r.support,
-                  resistance: r.resistance,
-                  assetType: matchedTrade.assetType,
-                  direction: matchedTrade.direction,
-                  symbol: matchedTrade.symbol,
-                  rawQuery: r.rawQuery || r.query,
-                  verdict: r.verdict,
-                  invested: matchedTrade.invested,
-                  leverage: matchedTrade.leverage,
-                });
-                return;
-              }
-
+              const isLong = matchedTrade.direction !== "short";
               onSendToCalculator({
-                entry: buyPrice,
-                stop: stopPrice,
-                takeProfit: sellPrice,
+                entry: r.price, // prix du scan, cohérent avec le stop/TP ci-dessous (pas le prix live)
+                stop: isLong ? r.atrStop : r.atrStopShort,
+                takeProfit: r.takeProfit,
                 support: r.support,
                 resistance: r.resistance,
-                assetType: resultAssetType,
-                direction: isBearishLevels ? "short" : "long",
-                symbol: resultSymbol,
+                assetType: matchedTrade.assetType,
+                direction: matchedTrade.direction,
+                symbol: matchedTrade.symbol,
                 rawQuery: r.rawQuery || r.query,
                 verdict: r.verdict,
+                invested: matchedTrade.invested,
+                leverage: matchedTrade.leverage,
               });
-            };
+              return;
+            }
+      
+            onSendToCalculator({
+              entry: r.price, // prix du scan, cohérent avec le stop/TP ci-dessous (pas le prix live)
+              stop: stopPrice,
+              takeProfit: sellPrice,
+              support: r.support,
+              resistance: r.resistance,
+              assetType: resultAssetType,
+              direction: isBearishLevels ? "short" : "long",
+              symbol: resultSymbol,
+              rawQuery: r.rawQuery || r.query,
+              verdict: r.verdict,
+            });
+          };
 
             return (
               <button
