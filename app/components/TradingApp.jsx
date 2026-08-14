@@ -2197,17 +2197,22 @@ function TopMarkets({ watchlist, onSendToCalculator, onGoToHistorique }) {
 
             const resultSymbol = r.symbol || r.query.toUpperCase();
             const resultAssetType = assetTypeForResult(r);
-          const isLive = r.type === "crypto" && livePrices[r.query] != null;
+            const isLive = r.type === "crypto" && livePrices[r.query] != null;
             const displayPrice = isLive ? livePrices[r.query] : r.price;
             const matchedTrade = openTrades.find(
               (t) => t.symbol === resultSymbol && t.assetType === resultAssetType
             );
-            const guidance = matchedTrade ? computePositionGuidance(matchedTrade, r) : null;
+            // On utilise le prix live pour la détection stop/TP touché (plus fiable
+            // qu'un prix figé au moment du scan) ; le verdict technique (r.verdict)
+            // reste celui du scan, il n'a pas besoin d'être temps réel.
+            const guidance = matchedTrade
+              ? computePositionGuidance(matchedTrade, { ...r, price: displayPrice })
+              : null;
 
             const action = guidance ? POSITION_BADGE[guidance.key] : ACTION_MAP[r.verdict] || ACTION_MAP["mitigé"];
 
             const isBearishLevels = r.levelsDirection === "baissier";
-            const buyPrice = displayPrice;
+            const buyPrice = r.price; // prix du scan, cohérent avec stop/TP/R:R (le prix live reste affiché en haut de carte)
             const sellPrice = r.takeProfit;
             const stopPrice = isBearishLevels ? r.atrStopShort : r.atrStop;
             const hasLevels = !guidance && sellPrice != null && stopPrice != null;
