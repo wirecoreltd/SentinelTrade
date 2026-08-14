@@ -2703,7 +2703,7 @@ export default function TradingApp() {
       <div style={{ width: "100%", maxWidth: 560, margin: "0 auto", boxSizing: "border-box" }}>
         <div style={{ marginBottom: 20 }}>
           <div style={{ fontSize: 12, color: ACCENT, letterSpacing: 1.5, textTransform: "uppercase", fontWeight: 700, marginBottom: 4 }}>
-            Discipline de trading
+            Sentinelle Trade
           </div>
           <div style={{ fontSize: 24, fontWeight: 700 }}>Marchés &amp; investissement</div>
         </div>
