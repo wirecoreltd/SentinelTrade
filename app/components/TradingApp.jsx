@@ -603,6 +603,27 @@ function computeTradeLevels({ verdict, currentPrice, support, resistance, atr })
   return { stop: null, target: null, riskReward: null, projected: false };
 }
 
+function computeFallbackSR(price, history, metal) {
+  if (metal) {
+    const pct = 0.015;
+    return {
+      support: price * (1 - pct),
+      resistance: price * (1 + pct),
+      atr: price * 0.0041667,
+    };
+  }
+  if (history && history.length >= 2) {
+    const sr = supportResistance(history);
+    const range = sr.resistance - sr.support;
+    return {
+      support: sr.support,
+      resistance: sr.resistance,
+      atr: range > 0 ? range * 0.08333 : null,
+    };
+  }
+  return { support: null, resistance: null, atr: null };
+}
+
 async function runMarketAnalysis(type, query) {
   let price, history;
   const metal = type === "fx" && isMetal(query);
