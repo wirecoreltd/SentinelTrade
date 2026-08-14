@@ -2062,14 +2062,49 @@ function splitLabel(label) {
   return { name: label, ticker: "" };
 }
 
+function formatRelativeFr(ms) {
+  const min = Math.floor(ms / 60000);
+  if (min < 1) return "à l'instant";
+  if (min === 1) return "il y a 1 min";
+  return `il y a ${min} min`;
+}
+
+// Vert < 5min, jaune 5-12min, rouge au-delà (le cache prix expire à 15min,
+// le cache news à 20min — le rouge prévient avant que ça devienne périmé)
+function ScanFreshnessBadge({ timestamp, now }) {
+  if (!timestamp) return null;
+  const ageMs = now - timestamp;
+  const ageMin = ageMs / 60000;
+  const color = ageMin < 5 ? POS : ageMin < 12 ? AMBER : NEG;
+  const exact = new Date(timestamp).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+
+  return (
+    <div
+      title={`Scan actualisé à ${exact}`}
+      style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 11, color, fontWeight: 700, marginBottom: 12 }}
+    >
+      <span style={{ width: 6, height: 6, borderRadius: "50%", background: color, display: "inline-block" }} />
+      Actualisé {formatRelativeFr(ageMs)}
+      <span style={{ color: MUTED, fontWeight: 400 }}>({exact})</span>
+    </div>
+  );
+}
+
 function TopMarkets({ watchlist, onSendToCalculator, onGoToHistorique }) {
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: watchlist.length });
   const [results, setResults] = useState([]);
   const [error, setError] = useState("");
   const [openTrades, setOpenTrades] = useState([]);
+  const [scanTime, setScanTime] = useState(null);
+  const [now, setNow] = useState(Date.now());
   const cryptoIds = watchlist.filter((w) => w.type === "crypto").map((w) => w.query);
   const livePrices = useBinanceLivePrices(cryptoIds);
+
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 30000); // rafraîchit l'affichage toutes les 30s
+    return () => clearInterval(id);
+  }, []);
 
   useEffect(() => {
     setOpenTrades(getOpenTrades(loadHistory()));
@@ -2148,6 +2183,7 @@ function TopMarkets({ watchlist, onSendToCalculator, onGoToHistorique }) {
     const failed = settled.filter((r) => r.error);
     ok.sort((a, b) => b.score - a.score);
     setResults([...ok, ...failed]);
+    setScanTime(Date.now());
     if (failed.length > 0 && ok.length === 0) {
       setError("Le scan a échoué pour tous les marchés — réessaie plus tard.");
     }
@@ -2168,6 +2204,8 @@ function TopMarkets({ watchlist, onSendToCalculator, onGoToHistorique }) {
         position (renforcer, conserver, sécuriser, clôturer…) basée sur ton historique. Clique
         un marché pour l'envoyer au calculateur ou gérer la position existante.
       </div>
+
+      {!loading && scanTime && <ScanFreshnessBadge timestamp={scanTime} now={now} />}
 
       {loading && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16, color: MUTED, fontSize: 13 }}>
