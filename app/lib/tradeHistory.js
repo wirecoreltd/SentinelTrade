@@ -19,6 +19,7 @@ export const DEFAULT_SETTINGS = {
   dailyRiskLimit: 100, // € — perte cumulée max acceptée sur les trades encore ouverts pris aujourd'hui
   maxTradesPerDay: 5, // nombre max de trades pris dans la journée, tous actifs confondus
   maxTradesPerAsset: 2, // nombre max de trades pris sur le même actif + même sens dans la journée
+  dailyBudget: 50,
 };
 
 function isBrowser() {
@@ -148,6 +149,19 @@ export function todayOpenRisk(history, dateKey = toLocalDateKey()) {
     .reduce((sum, t) => sum + (t.riskAmount || 0), 0);
 }
 
+// Somme des mises (invested) de tous les trades pris aujourd'hui, ouverts
+// ou déjà clôturés — le budget du jour se consomme dès la prise du trade,
+// pas seulement tant qu'il reste ouvert.
+export function todayInvested(history, dateKey = toLocalDateKey()) {
+  return getTodayTrades(history, dateKey).reduce((sum, t) => sum + (t.invested || 0), 0);
+}
+
+export function todayRemainingBudget(history, settings, dateKey = toLocalDateKey()) {
+  const invested = todayInvested(history, dateKey);
+  const budget = settings?.dailyBudget ?? DEFAULT_SETTINGS.dailyBudget;
+  return Math.max(0, budget - invested);
+}
+
 export function exposureByType(history) {
   const map = {};
   getOpenTrades(history).forEach((t) => {
@@ -274,6 +288,14 @@ export function checkGuidance(candidate, { history, settings } = {}) {
         `${openCrypto} position(s) crypto déjà ouverte(s) — ce nouveau trade crypto ajoute de la corrélation plutôt que de la diversification.`
       );
     }
+  }
+
+  // Dépassement du budget journalier
+  const remainingBudget = todayRemainingBudget(h, s, dateKey);
+  if ((candidate.invested || 0) > remainingBudget) {
+    warnings.push(
+      `Budget du jour : il te reste ${remainingBudget.toFixed(2)} € sur ${s.dailyBudget} €, mais tu investis ${(candidate.invested || 0).toFixed(2)} € sur ce trade.`
+    );
   }
 
   return warnings;
