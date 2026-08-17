@@ -173,14 +173,12 @@ async function fetchAlphaQuote(symbol) {
     const res = await fetch(`/api/stock?symbol=${encodeURIComponent(symbol)}&kind=quote`);
     const data = await res.json();
     if (data.error) throw new Error(data.error);
-    const q = data["Global Quote"];
-    if (!q || !q["05. price"]) {
-      const reason = alphaVantageErrorMessage(data);
-      throw new Error(reason || "Symbole introuvable");
+    if (data.status === "error" || data.close == null) {
+      throw new Error(data.message || "Symbole introuvable");
     }
     return {
-      price: parseFloat(q["05. price"]),
-      change24h: parseFloat(q["10. change percent"]),
+      price: parseFloat(data.close),
+      change24h: parseFloat(data.percent_change),
     };
   });
 }
@@ -190,18 +188,16 @@ async function fetchAlphaHistory(symbol) {
     const res = await fetch(`/api/stock?symbol=${encodeURIComponent(symbol)}&kind=history`);
     const data = await res.json();
     if (data.error) throw new Error(data.error);
-    const series = data["Time Series (Daily)"];
-    if (!series) {
-      const reason = alphaVantageErrorMessage(data);
-      throw new Error(reason || "Historique indisponible");
+    if (data.status === "error" || !Array.isArray(data.values)) {
+      throw new Error(data.message || "Historique indisponible");
     }
-    return Object.entries(series)
-      .map(([date, v]) => ({
-        date,
-        open: parseFloat(v["1. open"]),
-        close: parseFloat(v["4. close"]),
-        high: parseFloat(v["2. high"]),
-        low: parseFloat(v["3. low"]),
+    return data.values
+      .map((v) => ({
+        date: v.datetime,
+        open: parseFloat(v.open),
+        close: parseFloat(v.close),
+        high: parseFloat(v.high),
+        low: parseFloat(v.low),
       }))
       .sort((a, b) => new Date(a.date) - new Date(b.date));
   });
@@ -212,12 +208,10 @@ async function fetchFxQuote(symbol) {
     const res = await fetch(`/api/stock?symbol=${encodeURIComponent(symbol)}&kind=quote&market=fx`);
     const data = await res.json();
     if (data.error) throw new Error(data.error);
-    const q = data["Realtime Currency Exchange Rate"];
-    if (!q || !q["5. Exchange Rate"]) {
-      const reason = alphaVantageErrorMessage(data);
-      throw new Error(reason || "Devise introuvable (ex: EUR, GBP)");
+    if (data.status === "error" || data.close == null) {
+      throw new Error(data.message || "Devise introuvable (ex: EUR, GBP)");
     }
-    return { price: parseFloat(q["5. Exchange Rate"]), change24h: null };
+    return { price: parseFloat(data.close), change24h: parseFloat(data.percent_change) };
   });
 }
 
@@ -226,18 +220,16 @@ async function fetchFxHistory(symbol) {
     const res = await fetch(`/api/stock?symbol=${encodeURIComponent(symbol)}&kind=history&market=fx`);
     const data = await res.json();
     if (data.error) throw new Error(data.error);
-    const series = data["Time Series FX (Daily)"];
-    if (!series) {
-      const reason = alphaVantageErrorMessage(data);
-      throw new Error(reason || "Historique indisponible");
+    if (data.status === "error" || !Array.isArray(data.values)) {
+      throw new Error(data.message || "Historique indisponible");
     }
-    return Object.entries(series)
-      .map(([date, v]) => ({
-        date,
-        open: parseFloat(v["1. open"]),
-        close: parseFloat(v["4. close"]),
-        high: parseFloat(v["2. high"]),
-        low: parseFloat(v["3. low"]),
+    return data.values
+      .map((v) => ({
+        date: v.datetime,
+        open: parseFloat(v.open),
+        close: parseFloat(v.close),
+        high: parseFloat(v.high),
+        low: parseFloat(v.low),
       }))
       .sort((a, b) => new Date(a.date) - new Date(b.date));
   });
