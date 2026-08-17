@@ -2,10 +2,13 @@
 
 // ============================================================================
 // Onglet "Historique" — version compacte façon broker (Capital.com) :
-// une ligne par position avec entrée/actuel/SL/TP, P&L en direct quand
-// possible, et clôture rapide. Toute la logique de stockage/garde-fous/
-// stats reste dans ../lib/tradeHistory.js — ce fichier ne fait que
-// l'affichage + la récupération de prix "actuel" pour le P&L en direct.
+// les positions ouvertes sur un même actif (même symbole + même sens) sont
+// regroupées sous une carte d'en-tête agrégée (entrée moyenne pondérée,
+// actuel, SL/TP, P&L cumulé, "Tout fermer"), et chaque renforcement reste
+// listé en dessous avec ses propres niveaux et son bouton "Fermer" individuel.
+// Toute la logique de stockage/garde-fous/stats reste dans
+// ../lib/tradeHistory.js — ce fichier ne fait que l'affichage + la
+// récupération de prix "actuel" pour le P&L en direct.
 // ============================================================================
 
 import { useEffect, useMemo, useState, useCallback } from "react";
@@ -143,7 +146,7 @@ function SummaryCard({ label, value, sub, danger, editable, onSave }) {
   );
 }
 
-function CompactTradeRow({ trade, currentPrice, isLivePrice, onCloseWithResult, onCloseNoResult, onDelete }) {
+function CompactTradeRow({ trade, currentPrice, isLivePrice, onCloseWithResult, onCloseNoResult, onDelete, nested = false }) {
   const [closing, setClosing] = useState(false);
   const [exitInput, setExitInput] = useState("");
 
@@ -174,16 +177,18 @@ function CompactTradeRow({ trade, currentPrice, isLivePrice, onCloseWithResult, 
   const pnlPct = trade.realizedPnLPct != null ? trade.realizedPnLPct : unrealizedPnLPct;
 
   return (
-    <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: "10px 12px" }}>
+    <div style={{ background: nested ? NAVY : PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: "10px 12px" }}>
       {/* Ligne 1 : symbole + statut + P&L */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, gap: 8 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
-          <div style={{ width: 22, height: 22, borderRadius: 6, background: `${dirColor}1a`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-            <DirIcon size={12} color={dirColor} />
-          </div>
+          {!nested && (
+            <div style={{ width: 22, height: 22, borderRadius: 6, background: `${dirColor}1a`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+              <DirIcon size={12} color={dirColor} />
+            </div>
+          )}
           <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 13, fontWeight: 700 }}>{trade.symbol}</div>
-            <div style={{ fontSize: 10, color: MUTED }}>{isLong ? "Long" : "Short"} · {formatDate(trade.createdAt)}</div>
+            {!nested && <div style={{ fontSize: 13, fontWeight: 700 }}>{trade.symbol}</div>}
+            <div style={{ fontSize: 10, color: MUTED }}>{formatDate(trade.createdAt)}</div>
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
@@ -198,21 +203,21 @@ function CompactTradeRow({ trade, currentPrice, isLivePrice, onCloseWithResult, 
 
       {/* Ligne 2 : entrée / actuel / SL / TP */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6, marginBottom: 8 }}>
-        <div style={{ background: NAVY, borderRadius: 7, padding: "6px 7px" }}>
+        <div style={{ background: nested ? PANEL : NAVY, borderRadius: 7, padding: "6px 7px" }}>
           <div style={{ fontSize: 9, color: MUTED }}>Entrée</div>
           <div style={{ fontSize: 12, fontWeight: 700 }}>{formatPrice(trade.entry)}</div>
         </div>
-        <div style={{ background: NAVY, borderRadius: 7, padding: "6px 7px" }}>
+        <div style={{ background: nested ? PANEL : NAVY, borderRadius: 7, padding: "6px 7px" }}>
           <div style={{ fontSize: 9, color: MUTED, display: "flex", alignItems: "center", gap: 3 }}>
             Actuel {isLivePrice && <LiveBadge />}
           </div>
           <div style={{ fontSize: 12, fontWeight: 700 }}>{currentPrice != null ? formatPrice(currentPrice) : "—"}</div>
         </div>
-        <div style={{ background: NAVY, borderRadius: 7, padding: "6px 7px" }}>
+        <div style={{ background: nested ? PANEL : NAVY, borderRadius: 7, padding: "6px 7px" }}>
           <div style={{ fontSize: 9, color: MUTED }}>SL</div>
           <div style={{ fontSize: 12, fontWeight: 700, color: NEG }}>{formatPrice(trade.stop)}</div>
         </div>
-        <div style={{ background: NAVY, borderRadius: 7, padding: "6px 7px" }}>
+        <div style={{ background: nested ? PANEL : NAVY, borderRadius: 7, padding: "6px 7px" }}>
           <div style={{ fontSize: 9, color: MUTED }}>TP</div>
           <div style={{ fontSize: 12, fontWeight: 700, color: POS }}>{trade.takeProfit != null ? formatPrice(trade.takeProfit) : "—"}</div>
         </div>
@@ -265,6 +270,178 @@ function CompactTradeRow({ trade, currentPrice, isLivePrice, onCloseWithResult, 
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+// ============================================================================
+// Regroupement par position — plusieurs trades "ouvert" sur le même
+// symbole + même sens (ex: renforcements successifs) sont affichés sous
+// une carte d'en-tête agrégée façon broker (Capital.com), avec un bouton
+// "Tout fermer" en plus des boutons "Fermer" individuels.
+// ============================================================================
+
+function groupKey(t) {
+  return `${t.symbol}|${t.direction}|${t.assetType}`;
+}
+
+// Conserve l'ordre d'apparition (les trades les plus récents en premier,
+// comme dans l'historique) : un groupe apparaît à la position de son
+// trade "ouvert" le plus récent.
+function buildGroups(trades) {
+  const groups = [];
+  const indexByKey = {};
+  trades.forEach((t) => {
+    if (t.status !== "ouvert") {
+      groups.push({ key: t.id, trades: [t] });
+      return;
+    }
+    const key = groupKey(t);
+    if (indexByKey[key] == null) {
+      indexByKey[key] = groups.length;
+      groups.push({ key, trades: [t] });
+    } else {
+      groups[indexByKey[key]].trades.push(t);
+    }
+  });
+  return groups;
+}
+
+function GroupHeader({ trades, currentPrice, isLivePrice, onCloseAll }) {
+  const [closingAll, setClosingAll] = useState(false);
+  const [exitInput, setExitInput] = useState("");
+
+  const first = trades[0];
+  const isLong = first.direction !== "short";
+  const DirIcon = isLong ? TrendingUp : TrendingDown;
+  const dirColor = isLong ? POS : NEG;
+
+  const totalInvested = trades.reduce((s, t) => s + (t.invested || 0), 0);
+  const totalQty = trades.reduce((s, t) => s + (t.quantity || 0), 0);
+  const weightedEntry = totalQty > 0 ? trades.reduce((s, t) => s + (t.entry || 0) * (t.quantity || 0), 0) / totalQty : null;
+
+  const totalPnL =
+    currentPrice != null
+      ? trades.reduce((s, t) => {
+          if (t.quantity == null) return s;
+          const pnl = isLong ? t.quantity * (currentPrice - t.entry) : t.quantity * (t.entry - currentPrice);
+          return s + pnl;
+        }, 0)
+      : null;
+  const totalPnLPct = totalPnL != null && totalInvested > 0 ? (totalPnL / totalInvested) * 100 : null;
+
+  const sameLeverage = trades.every((t) => t.leverage === first.leverage);
+  const sameSL = trades.every((t) => t.stop === first.stop);
+  const sameTP = trades.every((t) => t.takeProfit === first.takeProfit);
+
+  const parsedExit = parseFloat(exitInput);
+  const exitValid = Number.isFinite(parsedExit) && parsedExit > 0;
+  const confirmCloseAll = () => {
+    if (!exitValid) return;
+    onCloseAll(trades.map((t) => t.id), parsedExit);
+    setClosingAll(false);
+    setExitInput("");
+  };
+
+  return (
+    <div style={{ background: "rgba(79,140,255,0.06)", border: `1px solid ${ACCENT}66`, borderRadius: 10, padding: "10px 12px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
+          <div style={{ width: 22, height: 22, borderRadius: 6, background: `${dirColor}1a`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+            <DirIcon size={12} color={dirColor} />
+          </div>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 13, fontWeight: 800 }}>{first.symbol}</div>
+            <div style={{ fontSize: 10, color: MUTED }}>
+              {trades.length} position{trades.length > 1 ? "s" : ""} {isLong ? "Long" : "Short"}
+              {sameLeverage && first.leverage ? ` · x${first.leverage}` : ""}
+            </div>
+          </div>
+        </div>
+        <div style={{ textAlign: "right", flexShrink: 0 }}>
+          {totalPnL != null && (
+            <div style={{ fontSize: 12, fontWeight: 700, color: totalPnL >= 0 ? POS : NEG, whiteSpace: "nowrap" }}>
+              {totalPnL >= 0 ? "+" : ""}{totalPnL.toFixed(2)} €{totalPnLPct != null ? ` (${totalPnLPct >= 0 ? "+" : ""}${totalPnLPct.toFixed(1)}%)` : ""}
+            </div>
+          )}
+          <div style={{ fontSize: 10, color: MUTED }}>Mise {totalInvested.toFixed(2)} €</div>
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6, marginBottom: 8 }}>
+        <div style={{ background: NAVY, borderRadius: 7, padding: "6px 7px" }}>
+          <div style={{ fontSize: 9, color: MUTED }}>Entrée moy.</div>
+          <div style={{ fontSize: 12, fontWeight: 700 }}>{weightedEntry != null ? formatPrice(weightedEntry) : "—"}</div>
+        </div>
+        <div style={{ background: NAVY, borderRadius: 7, padding: "6px 7px" }}>
+          <div style={{ fontSize: 9, color: MUTED, display: "flex", alignItems: "center", gap: 3 }}>
+            Actuel {isLivePrice && <LiveBadge />}
+          </div>
+          <div style={{ fontSize: 12, fontWeight: 700 }}>{currentPrice != null ? formatPrice(currentPrice) : "—"}</div>
+        </div>
+        <div style={{ background: NAVY, borderRadius: 7, padding: "6px 7px" }}>
+          <div style={{ fontSize: 9, color: MUTED }}>SL</div>
+          <div style={{ fontSize: 12, fontWeight: 700, color: NEG }}>{sameSL ? formatPrice(first.stop) : "mixte"}</div>
+        </div>
+        <div style={{ background: NAVY, borderRadius: 7, padding: "6px 7px" }}>
+          <div style={{ fontSize: 9, color: MUTED }}>TP</div>
+          <div style={{ fontSize: 12, fontWeight: 700, color: POS }}>
+            {sameTP ? (first.takeProfit != null ? formatPrice(first.takeProfit) : "—") : "mixte"}
+          </div>
+        </div>
+      </div>
+
+      {closingAll ? (
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <input
+            value={exitInput}
+            onChange={(e) => setExitInput(e.target.value)}
+            placeholder="Prix de sortie réel (toutes les positions)"
+            inputMode="decimal"
+            autoFocus
+            style={{ flex: 1, background: NAVY, border: `1px solid ${LINE}`, borderRadius: 8, padding: "7px 9px", color: TEXT, fontSize: 12 }}
+          />
+          <button onClick={confirmCloseAll} disabled={!exitValid} style={{ width: 30, height: 30, display: "flex", alignItems: "center", justifyContent: "center", background: exitValid ? "rgba(61,214,140,0.14)" : "transparent", border: `1px solid ${exitValid ? POS : LINE}`, color: exitValid ? POS : MUTED, borderRadius: 8, cursor: exitValid ? "pointer" : "not-allowed" }} title="Confirmer">
+            <Check size={13} />
+          </button>
+          <button onClick={() => { setClosingAll(false); setExitInput(""); }} style={{ width: 30, height: 30, display: "flex", alignItems: "center", justifyContent: "center", background: "transparent", border: `1px solid ${LINE}`, color: MUTED, borderRadius: 8, cursor: "pointer" }} title="Annuler">
+            <X size={13} />
+          </button>
+        </div>
+      ) : (
+        <button
+          onClick={() => setClosingAll(true)}
+          style={{ width: "100%", background: "rgba(255,103,103,0.10)", border: `1px solid ${NEG}`, color: NEG, borderRadius: 8, padding: "8px 0", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
+        >
+          Tout fermer ({trades.length})
+        </button>
+      )}
+    </div>
+  );
+}
+
+function PositionGroup({ trades, priceFor, onCloseWithResult, onCloseNoResult, onDelete, onCloseAllGroup }) {
+  const { price, isLive } = priceFor(trades[0]);
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      <GroupHeader trades={trades} currentPrice={price} isLivePrice={isLive} onCloseAll={onCloseAllGroup} />
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, paddingLeft: 10, borderLeft: `2px solid ${LINE}`, marginLeft: 4 }}>
+        {trades.map((trade) => {
+          const { price: p, isLive: l } = priceFor(trade);
+          return (
+            <CompactTradeRow
+              key={trade.id}
+              trade={trade}
+              currentPrice={p}
+              isLivePrice={l}
+              onCloseWithResult={onCloseWithResult}
+              onCloseNoResult={onCloseNoResult}
+              onDelete={onDelete}
+              nested
+            />
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -337,6 +514,21 @@ export default function HistoryTab() {
     setHistory(updateTradeStatus(id, status, { exitPrice }));
   };
 
+  // Ferme d'un coup toutes les positions d'un groupe (bouton "Tout fermer"),
+  // au même prix de sortie saisi par l'utilisateur.
+  const handleCloseAllGroup = (ids, exitPrice) => {
+    let result = history;
+    ids.forEach((id) => {
+      const trade = history.find((t) => t.id === id);
+      if (!trade) return;
+      const isLong = trade.direction !== "short";
+      const pnl = isLong ? exitPrice - trade.entry : trade.entry - exitPrice;
+      const status = pnl >= 0 ? "gagné" : "perdu";
+      result = updateTradeStatus(id, status, { exitPrice });
+    });
+    setHistory(result);
+  };
+
   const handleCloseNoResult = (id) => setHistory(updateTradeStatus(id, "clôturé"));
   const handleDelete = (id) => setHistory(deleteTrade(id));
 
@@ -361,6 +553,10 @@ export default function HistoryTab() {
     if (filter === "clos") return history.filter((t) => t.status !== "ouvert");
     return history;
   }, [history, filter]);
+
+  // Les trades "ouvert" du même symbole + même sens sont regroupés ; les
+  // autres statuts (gagné/perdu/clôturé) restent affichés individuellement.
+  const groups = useMemo(() => buildGroups(filtered), [filtered]);
 
   return (
     <div>
@@ -423,18 +619,32 @@ export default function HistoryTab() {
           Marque un trade comme pris depuis le Calculateur pour le voir apparaître ici.
         </div>
       ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {filtered.map((trade) => {
-            const { price, isLive } = priceFor(trade);
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {groups.map((g) => {
+            if (g.trades.length === 1) {
+              const trade = g.trades[0];
+              const { price, isLive } = priceFor(trade);
+              return (
+                <CompactTradeRow
+                  key={trade.id}
+                  trade={trade}
+                  currentPrice={price}
+                  isLivePrice={isLive}
+                  onCloseWithResult={handleCloseWithResult}
+                  onCloseNoResult={handleCloseNoResult}
+                  onDelete={handleDelete}
+                />
+              );
+            }
             return (
-              <CompactTradeRow
-                key={trade.id}
-                trade={trade}
-                currentPrice={price}
-                isLivePrice={isLive}
+              <PositionGroup
+                key={g.key}
+                trades={g.trades}
+                priceFor={priceFor}
                 onCloseWithResult={handleCloseWithResult}
                 onCloseNoResult={handleCloseNoResult}
                 onDelete={handleDelete}
+                onCloseAllGroup={handleCloseAllGroup}
               />
             );
           })}
