@@ -2,6 +2,9 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { calculateSentinelScore } from "../lib/sentinelEngine";
+import { isMetal, fetchMetalPrice, coingeckoProxy, fetchCoinGeckoPrice, fetchAlphaQuote, fetchFxQuote, cachedFetch } from "../lib/marketPrices";
+import { COINGECKO_TO_BINANCE, getBinanceSymbol, useBinanceLivePrices } from "../lib/binance";
+
 import {
   FileText,
   Calculator,
@@ -18,7 +21,7 @@ import {
 } from "lucide-react";
 import { NAVY, PANEL, ACCENT, TEXT, MUTED, LINE, POS, NEG, AMBER, LOCKED_BG } from "../lib/theme";
 import { formatPrice } from "../lib/format";
-import { addTrade, checkGuidance, loadHistory, getOpenTrades } from "../lib/tradeHistory";
+import { addTrade, checkGuidance, loadHistory, loadSettings, getOpenTrades, todayInvested, todayRemainingBudget } from "../lib/tradeHistory";
 import HistoryTab from "../components/HistoryTab";
 
 // ---------- Helper: extrait un message d'erreur exploitable d'une réponse Alpha Vantage ----------
@@ -2525,6 +2528,29 @@ function Calculateur({ prefill }) {
   const [stop, setStop] = useState(prefill?.stop?.toString() || "");
   const [takeProfit, setTakeProfit] = useState(prefill?.takeProfit?.toString() || "");
 
+  // --- Budget du jour ---
+  const [budgetInfo, setBudgetInfo] = useState(null); // { dailyBudget, investedToday, remaining }
+
+  const refreshBudget = useCallback(() => {
+    const s = loadSettings();
+    const h = loadHistory();
+    const investedToday = todayInvested(h);
+    const remaining = todayRemainingBudget(h, s);
+    setBudgetInfo({ dailyBudget: s.dailyBudget, investedToday, remaining });
+    return remaining;
+  }, []);
+
+  // Au premier rendu : si aucun montant n'a été fourni par le prefill
+  // (Dossier / Top 15 / Long terme), on propose le restant du budget du
+  // jour comme mise par défaut, plutôt qu'un "50" fixe.
+  useEffect(() => {
+    const remaining = refreshBudget();
+    if (!prefill?.invested) {
+      setInvested(remaining > 0 ? remaining.toFixed(2) : "0");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // --- Historique / garde-fous ---
   const [guidanceWarnings, setGuidanceWarnings] = useState([]);
   const [pendingLog, setPendingLog] = useState(null);
@@ -2535,7 +2561,8 @@ function Calculateur({ prefill }) {
     const nextAsset = prefill.assetType || "crypto";
     setMode(hasFullLevels(prefill) ? "auto" : "manual");
     setAssetType(nextAsset);
-    setInvested(prefill.invested?.toString() || "50");
+    const remaining = refreshBudget();
+    setInvested(prefill.invested?.toString() || (remaining > 0 ? remaining.toFixed(2) : "0"));
     setLeverage(prefill.leverage?.toString() || LEVERAGE_PRESETS[nextAsset].leverage.toString());
     setEntry(prefill.entry?.toString() || "");
     setStop(prefill.stop?.toString() || "");
@@ -2602,6 +2629,7 @@ function Calculateur({ prefill }) {
       setPendingLog(candidate);
     } else {
       addTrade(candidate);
+      refreshBudget();
       setLogged(true);
       setTimeout(() => setLogged(false), 2500);
     }
@@ -2610,6 +2638,7 @@ function Calculateur({ prefill }) {
   const confirmLogAnyway = () => {
     if (!pendingLog) return;
     addTrade(pendingLog);
+    refreshBudget();
     setGuidanceWarnings([]);
     setPendingLog(null);
     setLogged(true);
@@ -2660,6 +2689,21 @@ function Calculateur({ prefill }) {
           <button key={key} onClick={() => onAssetType(key)} disabled={autoLocked} style={{ padding: "6px 10px", borderRadius: 20, border: `1px solid ${assetType === key ? ACCENT : LINE}`, background: assetType === key ? "rgba(79,140,255,0.12)" : "transparent", color: assetType === key ? ACCENT : MUTED, fontSize: 12, fontWeight: 600, cursor: autoLocked ? "not-allowed" : "pointer", opacity: autoLocked && assetType !== key ? 0.55 : 1 }}>{v.label}</button>
         ))}
       </div>
+
+      {budgetInfo && (
+        <div style={{
+          display: "flex", justifyContent: "space-between", alignItems: "center",
+          background: NAVY, border: `1px solid ${LINE}`, borderRadius: 8,
+          padding: "8px 10px", marginBottom: 8, fontSize: 11,
+        }}>
+          <span style={{ color: MUTED }}>
+            Budget du jour : {budgetInfo.investedToday.toFixed(2)} € investis / {budgetInfo.dailyBudget.toFixed(2)} €
+          </span>
+          <span style={{ fontWeight: 700, color: budgetInfo.remaining > 0 ? POS : NEG }}>
+            Restant : {budgetInfo.remaining.toFixed(2)} €
+          </span>
+        </div>
+      )}
 
       {field("Montant à investir — ta mise / marge (€)", invested, setInvested, "ex: 50", false)}
       {field("Levier (x1 = sans levier, ex: Binance spot)", leverage, setLeverage, "ex: 2")}
