@@ -2641,15 +2641,6 @@ function Calculateur({ prefill }) {
 
       {valid ? (
         <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 16, marginTop: 8 }}>
-          <div style={{
-            display: "flex", alignItems: "flex-start", gap: 8, background: "rgba(255,103,103,0.10)",
-            border: `1.5px solid ${NEG}`, borderRadius: 8, padding: "10px 12px", marginBottom: 14,
-          }}>
-            <span style={{ fontSize: 16, lineHeight: 1 }}>⚠️</span>
-            <div style={{ fontSize: 12.5, color: TEXT, lineHeight: 1.5 }}>
-              <strong style={{ color: NEG }}>Sur Capital.com, sélectionne bien le mode "Niveau" / "Prix"</strong> pour le Stop loss et le Take-profit — <strong>pas "Distance"</strong>. Les valeurs ci-dessous sont des prix cibles, pas des écarts à ajouter.
-            </div>
-          </div>
           <div style={{ marginBottom: 12, paddingBottom: 12, borderBottom: `1px solid ${LINE}` }}>
             <div style={{ fontSize: 12, color: ACCENT, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 6 }}>À saisir sur Capital.com / Binance</div>
             <CopyableRow label="Taille" value={quantity.toFixed(6)} big />
