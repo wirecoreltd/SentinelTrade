@@ -2148,12 +2148,14 @@ function TopMarkets({ watchlist, onSendToCalculator, onGoToHistorique }) {
       setResults([...ok, ...failed]);
     };
 
-    const fastIndexes = [];
+    const cryptoIndexes = [];
+    const stockIndexes = [];
     const fxIndexes = [];
     watchlist.forEach((item, idx) => {
       if (item.type === "fx" && !isMetal(item.query)) fxIndexes.push(idx);
-      else fastIndexes.push(idx);
-    });
+      else if (item.type === "stock") stockIndexes.push(idx);
+      else cryptoIndexes.push(idx); // crypto + métaux (gold-api.com)
+    });  
 
     const runOne = async (idx, attempt = 0) => {
       const item = watchlist[idx];
@@ -2170,30 +2172,46 @@ function TopMarkets({ watchlist, onSendToCalculator, onGoToHistorique }) {
         });
       } catch (e) {
         const isFx = item.type === "fx" && !isMetal(item.query);
+        const isStock = item.type === "stock";
         if (!isFx && attempt < 1) {
-          await new Promise((res) => setTimeout(res, 2000));
+          // Les stocks (Twelve Data) ont besoin de bien plus de délai qu'un
+          // simple retry réseau : 20s pour laisser la fenêtre de 8 crédits/min
+          // se libérer, contre 2s pour tout le reste (CoinGecko, gold-api).
+          await new Promise((res) => setTimeout(res, isStock ? 20000 : 2000));
           return runOne(idx, attempt + 1);
         }
         markDone(idx, { label: item.label, type: item.type, query: item.query, error: e.message });
       }
     };
 
-    const BATCH_SIZE = 4;
-    const runFast = async () => {
-      for (let i = 0; i < fastIndexes.length; i += BATCH_SIZE) {
-        const batch = fastIndexes.slice(i, i + BATCH_SIZE);
+   const BATCH_SIZE = 4;
+    const runCrypto = async () => {
+      for (let i = 0; i < cryptoIndexes.length; i += BATCH_SIZE) {
+        const batch = cryptoIndexes.slice(i, i + BATCH_SIZE);
         await Promise.all(batch.map((idx) => runOne(idx)));
       }
     };
-
+    
+    // Chaque symbole stock consomme 2 crédits Twelve Data (quote + history).
+    // Limite gratuite : 8 crédits/min → on espace largement pour rester sous
+    // le seuil même si un crédit "history" pèse plus qu'1 (l'erreur d'origine
+    // montrait 17 crédits consommés pour une poignée d'appels).
+    const STOCK_GAP_MS = 15000; // ~4 symboles/min max, marge de sécurité incluse
+    const runStock = async () => {
+      for (const idx of stockIndexes) {
+        await runOne(idx);
+        await new Promise((res) => setTimeout(res, STOCK_GAP_MS));
+      }
+    };
+    
     const runFx = async () => {
       for (const idx of fxIndexes) {
         await runOne(idx);
         await new Promise((res) => setTimeout(res, 1000));
       }
     };
-
-    await Promise.all([runFast(), runFx()]);
+    
+    await Promise.all([runCrypto(), runStock(), runFx()]);
 
     setScanTime(Date.now());
     const ok = settled.filter(Boolean).filter((r) => !r.error);
