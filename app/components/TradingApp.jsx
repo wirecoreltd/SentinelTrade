@@ -2462,7 +2462,7 @@ function CalcField({ label, value, onChange, placeholder, readOnly = false }) {
   );
 }
 
-function CopyableRow({ label, value, big = false }) {
+function CopyableRow({ label, value, big = false, highlight = false }) {
   const [copied, setCopied] = useState(false);
   const doCopy = () => {
     navigator.clipboard?.writeText(String(value));
@@ -2471,7 +2471,7 @@ function CopyableRow({ label, value, big = false }) {
   };
   return (
     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-      <span style={{ fontSize: 13, color: MUTED }}>{label}</span>
+      <span style={{ fontSize: 13, color: highlight ? AMBER : MUTED, fontWeight: highlight ? 600 : 400 }}>{label}</span>
       <button
         onClick={doCopy}
         style={{
@@ -2653,10 +2653,10 @@ function Calculateur({ prefill }) {
           <div style={{ marginBottom: 12, paddingBottom: 12, borderBottom: `1px solid ${LINE}` }}>
             <div style={{ fontSize: 12, color: ACCENT, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 6 }}>À saisir sur Capital.com / Binance</div>
             <CopyableRow label="Taille" value={quantity.toFixed(6)} big />
-            <CopyableRow label="Stop loss — mode NIVEAU" value={formatPrice(s)} />
+            <CopyableRow label="Stop loss — Niveau de prix" value={formatPrice(s)} highlight />
             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}><span style={{ fontSize: 11, color: MUTED }}>Distance (info seulement, ne pas saisir)</span><span style={{ fontSize: 12, color: MUTED }}>{formatPrice(distance)} ({distancePct.toFixed(2)}%)</span></div>
             {tp > 0 && <>
-              <CopyableRow label="Take-profit — mode NIVEAU" value={formatPrice(tp)} />
+              <CopyableRow label="Take-profit — Niveau de prix" value={formatPrice(tp)} highlight />
               <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: 11, color: MUTED }}>Distance (info seulement, ne pas saisir)</span><span style={{ fontSize: 12, color: MUTED }}>{formatPrice(gainDistance)} ({gainDistancePct.toFixed(2)}%)</span></div>
             </>}
           </div>
@@ -2745,7 +2745,7 @@ export default function TradingApp() {
           <div style={{ fontSize: 24, fontWeight: 700 }}>Marchés &amp; investissement</div>
         </div>
 
-        <div style={{ display: "flex", gap: 2, marginBottom: 20, borderBottom: `1px solid ${LINE}`, paddingBottom: 4, overflowX: "auto", WebkitOverflowScrolling: "touch", scrollbarWidth: "none" }}>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 20, borderBottom: `1px solid ${LINE}`, paddingBottom: 4 }}>
           {tabs.map(({ id, label, icon: Icon }) => (
             <button
               key={id}
