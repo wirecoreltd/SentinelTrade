@@ -2462,6 +2462,31 @@ function CalcField({ label, value, onChange, placeholder, readOnly = false }) {
   );
 }
 
+function CopyableRow({ label, value, big = false }) {
+  const [copied, setCopied] = useState(false);
+  const doCopy = () => {
+    navigator.clipboard?.writeText(String(value));
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1200);
+  };
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+      <span style={{ fontSize: 13, color: MUTED }}>{label}</span>
+      <button
+        onClick={doCopy}
+        style={{
+          display: "flex", alignItems: "center", gap: 6, background: "transparent",
+          border: `1px solid ${copied ? POS : LINE}`, borderRadius: 6, padding: "3px 8px", cursor: "pointer",
+        }}
+        title="Copier"
+      >
+        <span style={{ fontSize: big ? 16 : 14, fontWeight: 700, color: copied ? POS : ACCENT }}>{value}</span>
+        <span style={{ fontSize: 10, color: copied ? POS : MUTED }}>{copied ? "✓" : "⧉"}</span>
+      </button>
+    </div>
+  );
+}
+
 function Calculateur({ prefill }) {
   const hasFullLevels = (p) => p && p.entry != null && p.stop != null;
   const [mode, setMode] = useState(hasFullLevels(prefill) ? "auto" : "manual");
@@ -2616,12 +2641,24 @@ function Calculateur({ prefill }) {
 
       {valid ? (
         <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 16, marginTop: 8 }}>
+          <div style={{
+            display: "flex", alignItems: "flex-start", gap: 8, background: "rgba(255,103,103,0.10)",
+            border: `1.5px solid ${NEG}`, borderRadius: 8, padding: "10px 12px", marginBottom: 14,
+          }}>
+            <span style={{ fontSize: 16, lineHeight: 1 }}>⚠️</span>
+            <div style={{ fontSize: 12.5, color: TEXT, lineHeight: 1.5 }}>
+              <strong style={{ color: NEG }}>Sur Capital.com, sélectionne bien le mode "Niveau" / "Prix"</strong> pour le Stop loss et le Take-profit — <strong>pas "Distance"</strong>. Les valeurs ci-dessous sont des prix cibles, pas des écarts à ajouter.
+            </div>
+          </div>
           <div style={{ marginBottom: 12, paddingBottom: 12, borderBottom: `1px solid ${LINE}` }}>
             <div style={{ fontSize: 12, color: ACCENT, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 6 }}>À saisir sur Capital.com / Binance</div>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}><span style={{ fontSize: 13, color: MUTED }}>Taille</span><span style={{ fontSize: 16, fontWeight: 700, color: ACCENT }}>{quantity.toFixed(6)}</span></div>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}><span style={{ fontSize: 13, color: MUTED }}>Stop loss — Niveau de prix</span><span style={{ fontSize: 14, fontWeight: 700 }}>{formatPrice(s)}</span></div>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}><span style={{ fontSize: 11, color: MUTED }}>Distance</span><span style={{ fontSize: 12, color: MUTED }}>{formatPrice(distance)} ({distancePct.toFixed(2)}%)</span></div>
-            {tp > 0 && <><div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}><span style={{ fontSize: 13, color: MUTED }}>Take-profit — Niveau de prix</span><span style={{ fontSize: 14, fontWeight: 700 }}>{formatPrice(tp)}</span></div><div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: 11, color: MUTED }}>Distance</span><span style={{ fontSize: 12, color: MUTED }}>{formatPrice(gainDistance)} ({gainDistancePct.toFixed(2)}%)</span></div></>}
+            <CopyableRow label="Taille" value={quantity.toFixed(6)} big />
+            <CopyableRow label="Stop loss — mode NIVEAU" value={formatPrice(s)} />
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}><span style={{ fontSize: 11, color: MUTED }}>Distance (info seulement, ne pas saisir)</span><span style={{ fontSize: 12, color: MUTED }}>{formatPrice(distance)} ({distancePct.toFixed(2)}%)</span></div>
+            {tp > 0 && <>
+              <CopyableRow label="Take-profit — mode NIVEAU" value={formatPrice(tp)} />
+              <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: 11, color: MUTED }}>Distance (info seulement, ne pas saisir)</span><span style={{ fontSize: 12, color: MUTED }}>{formatPrice(gainDistance)} ({gainDistancePct.toFixed(2)}%)</span></div>
+            </>}
           </div>
           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}><span style={{ fontSize: 13, color: MUTED }}>Taille totale de la position</span><span style={{ fontSize: 14, fontWeight: 700 }}>{positionValue.toFixed(2)} €</span></div>
           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}><span style={{ fontSize: 13, color: MUTED }}>Marge requise</span><span style={{ fontSize: 14, fontWeight: 700 }}>{inv.toFixed(2)} €</span></div>
