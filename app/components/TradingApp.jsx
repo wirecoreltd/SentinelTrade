@@ -1624,6 +1624,24 @@ const OTHER_WATCHLIST = [
   { type: "fx", query: "SGD", label: "SGD/USD" },
 ];
 
+const STOCK_WATCHLIST = [
+  { type: "stock", query: "AAPL", label: "Apple (AAPL)" },
+  { type: "stock", query: "MSFT", label: "Microsoft (MSFT)" },
+  { type: "stock", query: "GOOGL", label: "Alphabet (GOOGL)" },
+  { type: "stock", query: "AMZN", label: "Amazon (AMZN)" },
+  { type: "stock", query: "TSLA", label: "Tesla (TSLA)" },
+  { type: "stock", query: "NVDA", label: "Nvidia (NVDA)" },
+  { type: "stock", query: "META", label: "Meta (META)" },
+  { type: "stock", query: "JPM", label: "JPMorgan (JPM)" },
+  { type: "stock", query: "V", label: "Visa (V)" },
+  { type: "stock", query: "JNJ", label: "Johnson & Johnson (JNJ)" },
+  { type: "stock", query: "WMT", label: "Walmart (WMT)" },
+  { type: "stock", query: "DIS", label: "Disney (DIS)" },
+  { type: "stock", query: "NFLX", label: "Netflix (NFLX)" },
+  { type: "stock", query: "KO", label: "Coca-Cola (KO)" },
+  { type: "stock", query: "BA", label: "Boeing (BA)" },
+];
+
 const LONG_TERM_WATCHLIST = [
   { type: "crypto", query: "bitcoin", label: "Bitcoin (BTC)" },
   { type: "crypto", query: "ethereum", label: "Ethereum (ETH)" },
@@ -2712,14 +2730,34 @@ export default function TradingApp() {
   const [tab, setTab] = useState("top15-crypto");
   const [prefillCalc, setPrefillCalc] = useState(null);
 
-  const tabs = [
+  const topTabs = [
     { id: "top15-crypto", label: "Top Crypto", icon: ListOrdered },
     { id: "top15-autres", label: "Top Devises & Or", icon: ListOrdered },
+    { id: "top15-actions", label: "Top Actions", icon: ListOrdered },
     { id: "longterm", label: "📈 Long terme", icon: CalendarRange },
+  ];
+
+  const bottomTabs = [
     { id: "dossier", label: "Dossier", icon: FileText },
     { id: "calc", label: "Calculateur", icon: Calculator },
     { id: "historique", label: "Historique", icon: HistoryIcon },
   ];
+
+  const tabButtonStyle = (id) => ({
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+    background: "none",
+    border: "none",
+    color: tab === id ? TEXT : MUTED,
+    fontWeight: tab === id ? 700 : 500,
+    fontSize: 13,
+    padding: "8px 10px",
+    flex: "0 0 auto",
+    whiteSpace: "nowrap",
+    borderBottom: tab === id ? `2px solid ${ACCENT}` : "2px solid transparent",
+    cursor: "pointer",
+  });
 
   return (
     <div style={{ minHeight: "100vh", background: "#000000", color: TEXT, padding: "20px 12px 48px", boxSizing: "border-box", overflowX: "hidden" }}>
@@ -2736,27 +2774,16 @@ export default function TradingApp() {
           <div style={{ fontSize: 24, fontWeight: 700 }}>Marchés &amp; investissement</div>
         </div>
 
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 6, paddingBottom: 4 }}>
+          {topTabs.map(({ id, label, icon: Icon }) => (
+            <button key={id} onClick={() => setTab(id)} style={tabButtonStyle(id)}>
+              <Icon size={14} /> {label}
+            </button>
+          ))}
+        </div>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 20, borderBottom: `1px solid ${LINE}`, paddingBottom: 4 }}>
-          {tabs.map(({ id, label, icon: Icon }) => (
-            <button
-              key={id}
-              onClick={() => setTab(id)}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                background: "none",
-                border: "none",
-                color: tab === id ? TEXT : MUTED,
-                fontWeight: tab === id ? 700 : 500,
-                fontSize: 13,
-                padding: "8px 10px",
-                flex: "0 0 auto",
-                whiteSpace: "nowrap",
-                borderBottom: tab === id ? `2px solid ${ACCENT}` : "2px solid transparent",
-                cursor: "pointer",
-              }}
-            >
+          {bottomTabs.map(({ id, label, icon: Icon }) => (
+            <button key={id} onClick={() => setTab(id)} style={tabButtonStyle(id)}>
               <Icon size={14} /> {label}
             </button>
           ))}
@@ -2775,6 +2802,16 @@ export default function TradingApp() {
         {tab === "top15-autres" && (
           <TopMarkets
             watchlist={OTHER_WATCHLIST}
+            onSendToCalculator={(prefill) => {
+              setPrefillCalc(prefill);
+              setTab("calc");
+            }}
+            onGoToHistorique={() => setTab("historique")}
+          />
+        )}
+        {tab === "top15-actions" && (
+          <TopMarkets
+            watchlist={STOCK_WATCHLIST}
             onSendToCalculator={(prefill) => {
               setPrefillCalc(prefill);
               setTab("calc");
