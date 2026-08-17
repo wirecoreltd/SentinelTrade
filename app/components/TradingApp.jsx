@@ -2,9 +2,6 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { calculateSentinelScore } from "../lib/sentinelEngine";
-import { isMetal, fetchMetalPrice, coingeckoProxy, fetchCoinGeckoPrice, fetchAlphaQuote, fetchFxQuote, cachedFetch } from "../lib/marketPrices";
-import { COINGECKO_TO_BINANCE, getBinanceSymbol, useBinanceLivePrices } from "../lib/binance";
-
 import {
   FileText,
   Calculator,
@@ -21,26 +18,14 @@ import {
 } from "lucide-react";
 import { NAVY, PANEL, ACCENT, TEXT, MUTED, LINE, POS, NEG, AMBER, LOCKED_BG } from "../lib/theme";
 import { formatPrice } from "../lib/format";
-import { addTrade, checkGuidance, loadHistory, loadSettings, getOpenTrades, todayInvested, todayRemainingBudget } from "../lib/tradeHistory";
+import { addTrade, checkGuidance, loadHistory, loadSettings, saveSettings, getOpenTrades, todayInvested, todayRemainingBudget } from "../lib/tradeHistory";
+import { isMetal, fetchMetalPrice, coingeckoProxy, fetchCoinGeckoPrice, fetchAlphaQuote, fetchFxQuote, cachedFetch } from "../lib/marketPrices";
+import { COINGECKO_TO_BINANCE, getBinanceSymbol, useBinanceLivePrices } from "../lib/binance";
 import HistoryTab from "../components/HistoryTab";
 
 // ---------- Helper: extrait un message d'erreur exploitable d'une réponse Alpha Vantage ----------
 function alphaVantageErrorMessage(data) {
   return data?.Note || data?.Information || data?.["Error Message"] || null;
-}
-
-// ---------- Cache mémoire avec expiration ----------
-const apiCache = new Map();
-const CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
-
-async function cachedFetch(key, fetcher) {
-  const cached = apiCache.get(key);
-  if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
-    return cached.data;
-  }
-  const data = await fetcher();
-  apiCache.set(key, { data, ts: Date.now() });
-  return data;
 }
 
 // ---------- File d'attente pour les appels /api/news ----------
@@ -93,39 +78,6 @@ function writeNewsCache(query, data) {
   }
 }
 
-const METAL_SYMBOLS = ["XAU", "XAG"];
-function isMetal(symbol) {
-  return METAL_SYMBOLS.includes(symbol.toUpperCase());
-}
-
-async function fetchMetalPrice(symbol) {
-  const res = await fetch(`https://api.gold-api.com/price/${encodeURIComponent(symbol.toUpperCase())}`);
-  if (!res.ok) throw new Error("Métal introuvable (XAU pour l'or, XAG pour l'argent)");
-  const data = await res.json();
-  if (typeof data.price !== "number") throw new Error("Prix du métal indisponible");
-  return { price: data.price, change24h: null };
-}
-
-async function coingeckoProxy(path, params = {}) {
-  const query = new URLSearchParams({ path, ...params }).toString();
-  const res = await fetch(`/api/coingecko?${query}`);
-  const data = await res.json();
-  if (!res.ok) throw new Error(data?.error || "Erreur CoinGecko");
-  return data;
-}
-
-async function fetchCoinGeckoPrice(id) {
-  const data = await coingeckoProxy("simple/price", {
-    ids: id,
-    vs_currencies: "usd",
-    include_24hr_change: "true",
-  }).catch(() => {
-    throw new Error("Identifiant crypto introuvable");
-  });
-  if (!data[id]) throw new Error("Identifiant crypto introuvable");
-  return { price: data[id].usd, change24h: data[id].usd_24h_change };
-}
-
 async function fetchCoinGeckoHistory(id, days) {
   const data = await coingeckoProxy(`coins/${id}/market_chart`, {
     vs_currency: "usd",
@@ -171,21 +123,6 @@ async function fetchCoinGeckoOHLC(id, days) {
   return data.map(([ts, open, high, low, close]) => ({ date: ts, open, high, low, close }));
 }
 
-async function fetchAlphaQuote(symbol) {
-  return cachedFetch(`quote:${symbol}`, async () => {
-    const res = await fetch(`/api/stock?symbol=${encodeURIComponent(symbol)}&kind=quote`);
-    const data = await res.json();
-    if (data.error) throw new Error(data.error);
-    if (data.status === "error" || data.close == null) {
-      throw new Error(data.message || "Symbole introuvable");
-    }
-    return {
-      price: parseFloat(data.close),
-      change24h: parseFloat(data.percent_change),
-    };
-  });
-}
-
 async function fetchAlphaHistory(symbol) {
   return cachedFetch(`history:${symbol}`, async () => {
     const res = await fetch(`/api/stock?symbol=${encodeURIComponent(symbol)}&kind=history`);
@@ -203,18 +140,6 @@ async function fetchAlphaHistory(symbol) {
         low: parseFloat(v.low),
       }))
       .sort((a, b) => new Date(a.date) - new Date(b.date));
-  });
-}
-
-async function fetchFxQuote(symbol) {
-  return cachedFetch(`fxquote:${symbol}`, async () => {
-    const res = await fetch(`/api/stock?symbol=${encodeURIComponent(symbol)}&kind=quote&market=fx`);
-    const data = await res.json();
-    if (data.error) throw new Error(data.error);
-    if (data.status === "error" || data.close == null) {
-      throw new Error(data.message || "Devise introuvable (ex: EUR, GBP)");
-    }
-    return { price: parseFloat(data.close), change24h: parseFloat(data.percent_change) };
   });
 }
 
@@ -1114,104 +1039,6 @@ function CandleChart({ candles, overlays = [], height = 260 }) {
       })}
     </svg>
   );
-}
-
-// ─── Prix crypto en temps réel via Binance WebSocket (gratuit, sans clé API) ───
-//
-// Source unique de vérité pour la correspondance CoinGecko id → symbole
-// Binance. Utilisée à la fois par le WebSocket (prix live, ci-dessous) et par
-// fetchCalculatorCandles (chandeliers REST, plus bas dans le fichier).
-// Avant cette correction, il existait DEUX tables différentes, désynchronisées
-// entre elles :
-//   - "avalanche" au lieu de "avalanche-2" dans la table des chandeliers →
-//     le watchlist utilise "avalanche-2", donc le graphique AVAX ne se
-//     chargeait jamais ("Symbole Binance introuvable").
-//   - "shiba-inu" absent de la table des chandeliers → même bug pour SHIB.
-//   - "matic-network" → "maticusdt" dans la table du prix live, alors que
-//     Binance a délisté la paire MATICUSDT lors du swap MATIC → POL
-//     (septembre 2024) ; la paire active est POLUSDT.
-// Ne plus jamais dupliquer ce mapping ailleurs dans le fichier : tout doit
-// passer par getBinanceSymbol().
-const COINGECKO_TO_BINANCE = {
-  bitcoin: "BTCUSDT",
-  ethereum: "ETHUSDT",
-  solana: "SOLUSDT",
-  binancecoin: "BNBUSDT",
-  ripple: "XRPUSDT",
-  cardano: "ADAUSDT",
-  dogecoin: "DOGEUSDT",
-  "avalanche-2": "AVAXUSDT",
-  polkadot: "DOTUSDT",
-  chainlink: "LINKUSDT",
-  tron: "TRXUSDT",
-  "matic-network": "POLUSDT", // Polygon : MATIC → POL, MATICUSDT délisté sur Binance
-  litecoin: "LTCUSDT",
-  "shiba-inu": "SHIBUSDT",
-  uniswap: "UNIUSDT",
-};
-
-function getBinanceSymbol(coingeckoId) {
-  if (!coingeckoId) return null;
-  return COINGECKO_TO_BINANCE[coingeckoId.toLowerCase()] || null;
-}
-
-// ids : tableau d'ids CoinGecko (ex: ["bitcoin", "ethereum"]).
-// Retourne { [id]: dernierPrix } mis à jour à chaque trade Binance.
-function useBinanceLivePrices(ids) {
-  const [prices, setPrices] = useState({});
-  const idsKey = [...new Set(ids.filter((id) => getBinanceSymbol(id)))].sort().join(",");
-
-  useEffect(() => {
-    const activeIds = idsKey ? idsKey.split(",") : [];
-    if (activeIds.length === 0) return;
-
-    const streams = activeIds.map((id) => `${getBinanceSymbol(id).toLowerCase()}@trade`).join("/");
-    let ws;
-    let reconnectTimer;
-    let cancelled = false;
-
-    const connect = () => {
-      ws = new WebSocket(`wss://stream.binance.com:9443/stream?streams=${streams}`);
-
-      ws.onmessage = (event) => {
-        try {
-          const msg = JSON.parse(event.data);
-          const symbol = msg?.data?.s?.toLowerCase();
-          const price = parseFloat(msg?.data?.p);
-          if (!symbol || !Number.isFinite(price)) return;
-          const id = Object.keys(COINGECKO_TO_BINANCE).find(
-            (k) => getBinanceSymbol(k).toLowerCase() === symbol
-          );
-          if (!id) return;
-          setPrices((prev) => (prev[id] === price ? prev : { ...prev, [id]: price }));
-        } catch {
-          // trame malformée, on ignore
-        }
-      };
-
-      ws.onclose = () => {
-        if (cancelled) return;
-        reconnectTimer = setTimeout(connect, 3000);
-      };
-
-      ws.onerror = () => {
-        ws.close();
-      };
-    };
-
-    connect();
-
-    return () => {
-      cancelled = true;
-      clearTimeout(reconnectTimer);
-      if (ws) {
-        ws.onclose = null;
-        ws.close();
-      }
-    };
-  }, [idsKey]);
-
-  return prices;
 }
 
 function LiveBadge() {
@@ -2151,14 +1978,12 @@ function TopMarkets({ watchlist, onSendToCalculator, onGoToHistorique }) {
       setResults([...ok, ...failed]);
     };
 
-    const cryptoIndexes = [];
-    const stockIndexes = [];
+    const fastIndexes = [];
     const fxIndexes = [];
     watchlist.forEach((item, idx) => {
       if (item.type === "fx" && !isMetal(item.query)) fxIndexes.push(idx);
-      else if (item.type === "stock") stockIndexes.push(idx);
-      else cryptoIndexes.push(idx); // crypto + métaux (gold-api.com)
-    });  
+      else fastIndexes.push(idx);
+    });
 
     const runOne = async (idx, attempt = 0) => {
       const item = watchlist[idx];
@@ -2175,46 +2000,30 @@ function TopMarkets({ watchlist, onSendToCalculator, onGoToHistorique }) {
         });
       } catch (e) {
         const isFx = item.type === "fx" && !isMetal(item.query);
-        const isStock = item.type === "stock";
         if (!isFx && attempt < 1) {
-          // Les stocks (Twelve Data) ont besoin de bien plus de délai qu'un
-          // simple retry réseau : 20s pour laisser la fenêtre de 8 crédits/min
-          // se libérer, contre 2s pour tout le reste (CoinGecko, gold-api).
-          await new Promise((res) => setTimeout(res, isStock ? 20000 : 2000));
+          await new Promise((res) => setTimeout(res, 2000));
           return runOne(idx, attempt + 1);
         }
         markDone(idx, { label: item.label, type: item.type, query: item.query, error: e.message });
       }
     };
 
-   const BATCH_SIZE = 4;
-    const runCrypto = async () => {
-      for (let i = 0; i < cryptoIndexes.length; i += BATCH_SIZE) {
-        const batch = cryptoIndexes.slice(i, i + BATCH_SIZE);
+    const BATCH_SIZE = 4;
+    const runFast = async () => {
+      for (let i = 0; i < fastIndexes.length; i += BATCH_SIZE) {
+        const batch = fastIndexes.slice(i, i + BATCH_SIZE);
         await Promise.all(batch.map((idx) => runOne(idx)));
       }
     };
-    
-    // Chaque symbole stock consomme 2 crédits Twelve Data (quote + history).
-    // Limite gratuite : 8 crédits/min → on espace largement pour rester sous
-    // le seuil même si un crédit "history" pèse plus qu'1 (l'erreur d'origine
-    // montrait 17 crédits consommés pour une poignée d'appels).
-    const STOCK_GAP_MS = 15000; // ~4 symboles/min max, marge de sécurité incluse
-    const runStock = async () => {
-      for (const idx of stockIndexes) {
-        await runOne(idx);
-        await new Promise((res) => setTimeout(res, STOCK_GAP_MS));
-      }
-    };
-    
+
     const runFx = async () => {
       for (const idx of fxIndexes) {
         await runOne(idx);
         await new Promise((res) => setTimeout(res, 1000));
       }
     };
-    
-    await Promise.all([runCrypto(), runStock(), runFx()]);
+
+    await Promise.all([runFast(), runFx()]);
 
     setScanTime(Date.now());
     const ok = settled.filter(Boolean).filter((r) => !r.error);
@@ -2528,6 +2337,11 @@ function Calculateur({ prefill }) {
   const [stop, setStop] = useState(prefill?.stop?.toString() || "");
   const [takeProfit, setTakeProfit] = useState(prefill?.takeProfit?.toString() || "");
 
+  // --- Historique / garde-fous ---
+  const [guidanceWarnings, setGuidanceWarnings] = useState([]);
+  const [pendingLog, setPendingLog] = useState(null);
+  const [logged, setLogged] = useState(false);
+
   // --- Budget du jour ---
   const [budgetInfo, setBudgetInfo] = useState(null); // { dailyBudget, investedToday, remaining }
 
@@ -2551,11 +2365,6 @@ function Calculateur({ prefill }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // --- Historique / garde-fous ---
-  const [guidanceWarnings, setGuidanceWarnings] = useState([]);
-  const [pendingLog, setPendingLog] = useState(null);
-  const [logged, setLogged] = useState(false);
-
   useEffect(() => {
     if (!prefill) return;
     const nextAsset = prefill.assetType || "crypto";
@@ -2570,6 +2379,7 @@ function Calculateur({ prefill }) {
     setGuidanceWarnings([]);
     setPendingLog(null);
     setLogged(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prefill]);
 
   const onAssetType = (t) => {
@@ -2704,7 +2514,6 @@ function Calculateur({ prefill }) {
           </span>
         </div>
       )}
-
       {field("Montant à investir — ta mise / marge (€)", invested, setInvested, "ex: 50", false)}
       {field("Levier (x1 = sans levier, ex: Binance spot)", leverage, setLeverage, "ex: 2")}
       {field("Prix d'entrée", entry, setEntry, "ex: 4346.55")}
