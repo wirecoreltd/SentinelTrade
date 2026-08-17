@@ -1609,49 +1609,20 @@ async function runLongTermAnalysis(item) {
   };
 }
 
-function LongTermInvestissement({ onSendToCalculator }) {
+function LongTermInvestissement({ scanState, onSendToCalculator }) {
   const [horizon, setHorizon] = useState("3m");
-  const [loading, setLoading] = useState(false);
-  const [progress, setProgress] = useState({ done: 0, total: LONG_TERM_WATCHLIST.length });
-  const [results, setResults] = useState([]);
-  const [error, setError] = useState("");
-  const cacheRef = useRef(null);
   const liveIds = LONG_TERM_WATCHLIST.map((w) => w.query);
   const livePrices = useBinanceLivePrices(liveIds);
 
-  const runScan = useCallback(async () => {
-    setError("");
-    if (cacheRef.current) {
-      const cached = cacheRef.current;
-      const ok = cached.filter((r) => !r.error).sort((a, b) => b.horizons[horizon].rankingScore - a.horizons[horizon].rankingScore);
-      const failed = cached.filter((r) => r.error);
-      setResults([...ok, ...failed]);
-      return;
-    }
+  const { results: rawResults, loading, done, total, error } = scanState;
 
-    setLoading(true);
-    setResults([]);
-    setProgress({ done: 0, total: LONG_TERM_WATCHLIST.length });
-    const settled = [];
-    for (const item of LONG_TERM_WATCHLIST) {
-      try {
-        settled.push(await runLongTermAnalysis(item));
-      } catch (e) {
-        settled.push({ ...item, error: e.message });
-      }
-      setProgress((p) => ({ ...p, done: p.done + 1 }));
-    }
-    cacheRef.current = settled;
-    const ok = settled.filter((r) => !r.error).sort((a, b) => b.horizons[horizon].rankingScore - a.horizons[horizon].rankingScore);
-    const failed = settled.filter((r) => r.error);
-    setResults([...ok, ...failed]);
-    if (!ok.length) setError("Impossible d'obtenir les données long terme pour le moment.");
-    setLoading(false);
-  }, [horizon]);
-
-  useEffect(() => {
-    runScan();
-  }, [runScan]);
+  // Le classement dépend de l'horizon sélectionné (rankingScore par horizon),
+  // c'est donc un tri purement local à l'affichage — les données brutes
+  // viennent de l'orchestrateur de scan partagé au niveau de l'app.
+  const results = [...rawResults]
+    .filter((r) => !r.error)
+    .sort((a, b) => b.horizons[horizon].rankingScore - a.horizons[horizon].rankingScore)
+    .concat(rawResults.filter((r) => r.error));
 
   const selectedHorizon = LONG_TERM_HORIZONS.find((h) => h.key === horizon);
 
@@ -1700,7 +1671,7 @@ function LongTermInvestissement({ onSendToCalculator }) {
 
       {loading && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, color: MUTED, fontSize: 13, marginBottom: 12 }}>
-          <Loader2 className="spin" size={15} color={ACCENT} /> Analyse long terme {progress.done}/{progress.total}…
+          <Loader2 className="spin" size={15} color={ACCENT} /> Analyse long terme {done}/{total}…
         </div>
       )}
       {error && <div style={{ color: NEG, fontSize: 13, marginBottom: 10 }}>{error}</div>}
@@ -1930,16 +1901,13 @@ function ScanFreshnessBadge({ timestamp, now }) {
   );
 }
 
-function TopMarkets({ watchlist, onSendToCalculator, onGoToHistorique }) {
-  const [loading, setLoading] = useState(false);
-  const [progress, setProgress] = useState({ done: 0, total: watchlist.length });
-  const [results, setResults] = useState([]);
-  const [error, setError] = useState("");
+function TopMarkets({ watchlist, scanState, onSendToCalculator, onGoToHistorique }) {
   const [openTrades, setOpenTrades] = useState([]);
-  const [scanTime, setScanTime] = useState(null);
   const [now, setNow] = useState(Date.now());
   const cryptoIds = watchlist.filter((w) => w.type === "crypto").map((w) => w.query);
   const livePrices = useBinanceLivePrices(cryptoIds);
+
+  const { results, loading, done, total, error, scanTime } = scanState;
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 30000); // rafraîchit l'affichage toutes les 30s
@@ -1948,96 +1916,7 @@ function TopMarkets({ watchlist, onSendToCalculator, onGoToHistorique }) {
 
   useEffect(() => {
     setOpenTrades(getOpenTrades(loadHistory()));
-  }, []);
-
-  const runScan = useCallback(async () => {
-    setLoading(true);
-    setError("");
-    setResults([]);
-    setProgress({ done: 0, total: watchlist.length });
-    setOpenTrades(getOpenTrades(loadHistory()));
-
-    const cryptoIds = watchlist.filter((w) => w.type === "crypto").map((w) => w.query);
-    const marketsMeta = await fetchCoinGeckoMarketsByIds(cryptoIds);
-    const metaMap = {};
-    (marketsMeta || []).forEach((m) => {
-      metaMap[m.id] = m;
-    });
-
-    const settled = new Array(watchlist.length);
-    let doneCount = 0;
-    const markDone = (idx, value) => {
-      settled[idx] = value;
-      doneCount += 1;
-      setProgress({ done: doneCount, total: watchlist.length });
-
-      // Affiche les résultats au fur et à mesure au lieu d'attendre le scan complet
-      const soFar = settled.filter(Boolean);
-      const ok = soFar.filter((r) => !r.error).sort((a, b) => b.score - a.score);
-      const failed = soFar.filter((r) => r.error);
-      setResults([...ok, ...failed]);
-    };
-
-    const fastIndexes = [];
-    const fxIndexes = [];
-    watchlist.forEach((item, idx) => {
-      if (item.type === "fx" && !isMetal(item.query)) fxIndexes.push(idx);
-      else fastIndexes.push(idx);
-    });
-
-    const runOne = async (idx, attempt = 0) => {
-      const item = watchlist[idx];
-      try {
-        const r = await runMarketAnalysis(item.type, item.query);
-        const meta = item.type === "crypto" ? metaMap[item.query] : null;
-        markDone(idx, {
-          ...r,
-          label: item.label,
-          type: item.type,
-          query: item.query,
-          image: meta?.image || null,
-          change24h: r.change24h != null ? r.change24h : meta?.price_change_percentage_24h ?? null,
-        });
-      } catch (e) {
-        const isFx = item.type === "fx" && !isMetal(item.query);
-        if (!isFx && attempt < 1) {
-          await new Promise((res) => setTimeout(res, 2000));
-          return runOne(idx, attempt + 1);
-        }
-        markDone(idx, { label: item.label, type: item.type, query: item.query, error: e.message });
-      }
-    };
-
-    const BATCH_SIZE = 4;
-    const runFast = async () => {
-      for (let i = 0; i < fastIndexes.length; i += BATCH_SIZE) {
-        const batch = fastIndexes.slice(i, i + BATCH_SIZE);
-        await Promise.all(batch.map((idx) => runOne(idx)));
-      }
-    };
-
-    const runFx = async () => {
-      for (const idx of fxIndexes) {
-        await runOne(idx);
-        await new Promise((res) => setTimeout(res, 1000));
-      }
-    };
-
-    await Promise.all([runFast(), runFx()]);
-
-    setScanTime(Date.now());
-    const ok = settled.filter(Boolean).filter((r) => !r.error);
-    const failed = settled.filter(Boolean).filter((r) => r.error);
-    if (failed.length > 0 && ok.length === 0) {
-      setError("Le scan a échoué pour tous les marchés — réessaie plus tard.");
-    }
-    setLoading(false);
-  }, [watchlist]);
-
-  useEffect(() => {
-    runScan();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [results]);
 
   return (
     <div>
@@ -2054,7 +1933,7 @@ function TopMarkets({ watchlist, onSendToCalculator, onGoToHistorique }) {
       {loading && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16, color: MUTED, fontSize: 13 }}>
           <Loader2 className="spin" size={16} color={ACCENT} />
-          Analyse {progress.done}/{progress.total}…
+          Analyse {done}/{total}…
         </div>
       )}
 
@@ -2589,9 +2468,217 @@ function Calculateur({ prefill }) {
   );
 }
 
+// ============================================================================
+// Orchestrateur de scan global — charge les 4 onglets de marché
+// (Top Crypto / Top Devises & Or / Top Actions / Long terme) en arrière-plan
+// dès le montage de l'app, quel que soit l'onglet affiché. L'onglet actif
+// passe toujours en tête de file : dès qu'un "worker" se libère, il regarde
+// en priorité s'il reste du travail pour l'onglet actuellement affiché avant
+// de reprendre les autres onglets là où ils en étaient.
+// ============================================================================
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+const SCAN_CHANNELS = {
+  "top15-crypto": { watchlist: CRYPTO_WATCHLIST, kind: "top15" },
+  "top15-autres": { watchlist: OTHER_WATCHLIST, kind: "top15" },
+  "top15-actions": { watchlist: STOCK_WATCHLIST, kind: "top15" },
+  "longterm": { watchlist: LONG_TERM_WATCHLIST, kind: "longterm" },
+};
+
+const SCAN_CHANNEL_IDS = Object.keys(SCAN_CHANNELS);
+const FAST_LANE_CONCURRENCY = 4;
+const FX_LANE_GAP_MS = 1000;
+
+function useMarketScans(activeTab) {
+  const [state, setState] = useState(() => {
+    const init = {};
+    SCAN_CHANNEL_IDS.forEach((id) => {
+      init[id] = {
+        results: [],
+        loading: true,
+        done: 0,
+        total: SCAN_CHANNELS[id].watchlist.length,
+        error: "",
+        scanTime: null,
+      };
+    });
+    return init;
+  });
+
+  const activeTabRef = useRef(activeTab);
+  useEffect(() => {
+    activeTabRef.current = activeTab;
+  }, [activeTab]);
+
+  const settledRef = useRef({});
+  const metaMapRef = useRef({});
+  const fastQueueRef = useRef([]);
+  const fxQueueRef = useRef([]);
+
+  const handleJobDone = useCallback((job, result) => {
+    const { channelId, index } = job;
+    const arr = settledRef.current[channelId];
+    arr[index] = result;
+    const doneCount = arr.filter(Boolean).length;
+    const total = arr.length;
+    const kind = SCAN_CHANNELS[channelId].kind;
+
+    let sortedResults;
+    if (kind === "top15") {
+      const ok = arr.filter((r) => r && !r.error).sort((a, b) => b.score - a.score);
+      const failed = arr.filter((r) => r && r.error);
+      sortedResults = [...ok, ...failed];
+    } else {
+      // Long terme : ordre brut conservé, le tri par horizon est fait à
+      // l'affichage (dépend d'un choix local à l'utilisateur, pas du scan).
+      sortedResults = arr.filter(Boolean);
+    }
+
+    setState((prev) => ({
+      ...prev,
+      [channelId]: {
+        ...prev[channelId],
+        results: sortedResults,
+        done: doneCount,
+        loading: doneCount < total,
+        error: doneCount === total && sortedResults.every((r) => r.error) ? "Le scan a échoué pour tous les marchés — réessaie plus tard." : "",
+        scanTime: doneCount === total ? Date.now() : prev[channelId].scanTime,
+      },
+    }));
+  }, []);
+
+  const pickNextJob = useCallback((queueRef) => {
+    const list = queueRef.current;
+    if (list.length === 0) return null;
+    const activeChannel = activeTabRef.current;
+    let idx = list.findIndex((j) => j.channelId === activeChannel);
+    if (idx === -1) idx = 0;
+    const [job] = list.splice(idx, 1);
+    return job;
+  }, []);
+
+  const runJob = useCallback(async (job) => {
+    const { channelId, kind, item } = job;
+    if (kind === "longterm") {
+      try {
+        const r = await runLongTermAnalysis(item);
+        return r;
+      } catch (e) {
+        return { ...item, error: e.message };
+      }
+    }
+    try {
+      const r = await runMarketAnalysis(item.type, item.query);
+      const meta = item.type === "crypto" ? metaMapRef.current[channelId]?.[item.query] : null;
+      return {
+        ...r,
+        label: item.label,
+        type: item.type,
+        query: item.query,
+        image: meta?.image || null,
+        change24h: r.change24h != null ? r.change24h : meta?.price_change_percentage_24h ?? null,
+      };
+    } catch (e) {
+      return { label: item.label, type: item.type, query: item.query, error: e.message };
+    }
+  }, []);
+
+  const runJobWithRetry = useCallback(async (job) => {
+    let result = await runJob(job);
+    if (result.error && job.laneType !== "fx") {
+      await sleep(2000);
+      result = await runJob(job);
+    }
+    return result;
+  }, [runJob]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function init() {
+      // 1. Récupère les métadonnées (icônes, %24h) pour les channels qui
+      // contiennent des cryptos, en parallèle pour tous les channels.
+      await Promise.all(
+        SCAN_CHANNEL_IDS.map(async (channelId) => {
+          const wl = SCAN_CHANNELS[channelId].watchlist;
+          settledRef.current[channelId] = new Array(wl.length);
+          const cryptoIds = wl.filter((w) => w.type === "crypto").map((w) => w.query);
+          if (cryptoIds.length > 0) {
+            const metas = await fetchCoinGeckoMarketsByIds(cryptoIds);
+            const map = {};
+            (metas || []).forEach((m) => {
+              map[m.id] = m;
+            });
+            metaMapRef.current[channelId] = map;
+          }
+        })
+      );
+      if (cancelled) return;
+
+      // 2. Construit les deux files (rapide / fx séquentiel) avec tous les
+      // jobs de tous les channels.
+      const fastJobs = [];
+      const fxJobs = [];
+      SCAN_CHANNEL_IDS.forEach((channelId) => {
+        const { watchlist, kind } = SCAN_CHANNELS[channelId];
+        watchlist.forEach((item, index) => {
+          const laneType = kind === "top15" && item.type === "fx" && !isMetal(item.query) ? "fx" : "fast";
+          const job = { channelId, kind, item, index, laneType };
+          if (laneType === "fx") fxJobs.push(job);
+          else fastJobs.push(job);
+        });
+      });
+      fastQueueRef.current = fastJobs;
+      fxQueueRef.current = fxJobs;
+
+      // 3. Lance les workers. La voie rapide tourne à concurrence
+      // FAST_LANE_CONCURRENCY (comme le batching par 4 d'origine) ; la voie
+      // fx reste séquentielle avec un délai entre chaque appel (contrainte
+      // Alpha Vantage). À chaque job libéré, on redemande la priorité
+      // (onglet actif en tête), donc un changement d'onglet fait "sauter la
+      // file" pour les jobs restants.
+      async function fastWorker() {
+        while (!cancelled) {
+          const job = pickNextJob(fastQueueRef);
+          if (!job) return;
+          const result = await runJobWithRetry(job);
+          if (cancelled) return;
+          handleJobDone(job, result);
+        }
+      }
+
+      async function fxWorker() {
+        while (!cancelled) {
+          const job = pickNextJob(fxQueueRef);
+          if (!job) return;
+          const result = await runJobWithRetry(job);
+          if (cancelled) return;
+          handleJobDone(job, result);
+          await sleep(FX_LANE_GAP_MS);
+        }
+      }
+
+      const fastWorkers = Array.from({ length: FAST_LANE_CONCURRENCY }, () => fastWorker());
+      await Promise.all([...fastWorkers, fxWorker()]);
+    }
+
+    init();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return state;
+}
+
 export default function TradingApp() {
   const [tab, setTab] = useState("top15-crypto");
   const [prefillCalc, setPrefillCalc] = useState(null);
+  const scanState = useMarketScans(tab);
 
   const topTabs = [
     { id: "top15-crypto", label: "Top Crypto", icon: ListOrdered },
@@ -2621,6 +2708,12 @@ export default function TradingApp() {
     borderBottom: tab === id ? `2px solid ${ACCENT}` : "2px solid transparent",
     cursor: "pointer",
   });
+
+  const goToHistorique = () => setTab("historique");
+  const sendToCalc = (prefill) => {
+    setPrefillCalc(prefill);
+    setTab("calc");
+  };
 
   return (
     <div style={{ minHeight: "100vh", background: "#000000", color: TEXT, padding: "20px 12px 48px", boxSizing: "border-box", overflowX: "hidden" }}>
@@ -2655,39 +2748,31 @@ export default function TradingApp() {
         {tab === "top15-crypto" && (
           <TopMarkets
             watchlist={CRYPTO_WATCHLIST}
-            onSendToCalculator={(prefill) => {
-              setPrefillCalc(prefill);
-              setTab("calc");
-            }}
-            onGoToHistorique={() => setTab("historique")}
+            scanState={scanState["top15-crypto"]}
+            onSendToCalculator={sendToCalc}
+            onGoToHistorique={goToHistorique}
           />
         )}
         {tab === "top15-autres" && (
           <TopMarkets
             watchlist={OTHER_WATCHLIST}
-            onSendToCalculator={(prefill) => {
-              setPrefillCalc(prefill);
-              setTab("calc");
-            }}
-            onGoToHistorique={() => setTab("historique")}
+            scanState={scanState["top15-autres"]}
+            onSendToCalculator={sendToCalc}
+            onGoToHistorique={goToHistorique}
           />
         )}
         {tab === "top15-actions" && (
           <TopMarkets
             watchlist={STOCK_WATCHLIST}
-            onSendToCalculator={(prefill) => {
-              setPrefillCalc(prefill);
-              setTab("calc");
-            }}
-            onGoToHistorique={() => setTab("historique")}
+            scanState={scanState["top15-actions"]}
+            onSendToCalculator={sendToCalc}
+            onGoToHistorique={goToHistorique}
           />
         )}
         {tab === "longterm" && (
           <LongTermInvestissement
-            onSendToCalculator={(prefill) => {
-              setPrefillCalc(prefill);
-              setTab("calc");
-            }}
+            scanState={scanState["longterm"]}
+            onSendToCalculator={sendToCalc}
           />
         )}
         {tab === "dossier" && <Dossier setTab={setTab} setPrefillCalc={setPrefillCalc} />}
