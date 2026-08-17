@@ -1,19 +1,17 @@
 // Proxy vers Twelve Data — la clé vient d'une variable d'environnement
 // côté serveur (TWELVE_DATA_API_KEY), jamais exposée au navigateur.
-// Remplace Alpha Vantage (25 requêtes/jour) pour lever la limite trop
-// basse pour scanner plusieurs watchlists (devises + actions) par jour.
-// Twelve Data : 800 requêtes/jour gratuites, même API pour actions et forex.
 //
 // market=equity (défaut) : actions, ex. symbol=TSLA
-// market=fx              : devises et métaux (or=XAU, argent=XAG), ex. symbol=EUR ou XAU, coté contre USD
+// market=fx              : devises (or/argent restent gérés via gold-api,
+//                           pas cette route), ex. symbol=EUR ou GBP, coté
+//                           contre USD → converti en "EUR/USD" pour Twelve Data
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
   const symbol = searchParams.get("symbol");
   const kind = searchParams.get("kind"); // "quote" ou "history"
   const market = searchParams.get("market") || "equity";
-  // .trim() : élimine un espace ou retour à la ligne invisible qui peut
-  // s'être glissé lors du copier-coller de la clé dans Vercel.
   const key = process.env.TWELVE_DATA_API_KEY?.trim();
+
   if (!symbol || !kind) {
     return Response.json({ error: "Paramètres manquants (symbol, kind)" }, { status: 400 });
   }
@@ -24,8 +22,7 @@ export async function GET(request) {
     );
   }
 
-  // Twelve Data attend "EUR/USD" pour le forex, pas "EUR" seul comme Alpha Vantage.
-  const tdSymbol = market === "fx" ? `${symbol}/USD` : symbol;
+  const tdSymbol = market === "fx" ? `${symbol.toUpperCase()}/USD` : symbol.toUpperCase();
 
   const url =
     kind === "history"
