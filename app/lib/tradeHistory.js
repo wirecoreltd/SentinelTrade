@@ -3,7 +3,8 @@
 // ============================================================================
 // Historique des trades "pris" (marqués manuellement depuis le Calculateur)
 // + garde-fous de discipline (surexposition sur un même actif, limite de
-// risque cumulé par jour, limite du nombre de trades par jour)
+// risque cumulé par jour, limite du nombre de trades par jour, budget
+// journalier)
 // + suivi de performance réel (P&L calculé à partir d'un prix de sortie
 // saisi, pas d'une déclaration "gagné/perdu" manuelle).
 //
@@ -19,7 +20,7 @@ export const DEFAULT_SETTINGS = {
   dailyRiskLimit: 100, // € — perte cumulée max acceptée sur les trades encore ouverts pris aujourd'hui
   maxTradesPerDay: 5, // nombre max de trades pris dans la journée, tous actifs confondus
   maxTradesPerAsset: 2, // nombre max de trades pris sur le même actif + même sens dans la journée
-  dailyBudget: 50,
+  dailyBudget: 50, // € — montant total qu'on s'autorise à investir (mise) sur une journée
 };
 
 function isBrowser() {
@@ -131,7 +132,7 @@ export function deleteTrade(id) {
   return next;
 }
 
-// ---------- Lecture / stats de discipline (existant) ----------
+// ---------- Lecture / stats de discipline ----------
 
 export function getTodayTrades(history, dateKey = toLocalDateKey()) {
   return history.filter((t) => t.dateKey === dateKey);
@@ -170,7 +171,7 @@ export function exposureByType(history) {
   return map;
 }
 
-// ---------- Stats de performance (nouveau) ----------
+// ---------- Stats de performance ----------
 //
 // Ne prend en compte QUE les trades clôturés avec un P&L réellement calculé
 // (realizedPnL non-null), donc jamais un trade "clôturé" sans prix de sortie.
@@ -241,7 +242,7 @@ export function getStats(history) {
   };
 }
 
-// ---------- Garde-fous (existant, inchangé) ----------
+// ---------- Garde-fous ----------
 // Renvoie un tableau de messages d'avertissement (vide = rien à signaler)
 // pour un trade candidat, sans jamais bloquer : c'est à toi de décider si
 // tu confirmes quand même.
@@ -281,8 +282,6 @@ export function checkGuidance(candidate, { history, settings } = {}) {
 
   // Corrélation crypto : plusieurs positions crypto ouvertes en même temps
   // ne sont pas vraiment une diversification (elles bougent souvent ensemble).
-    // Corrélation crypto : plusieurs positions crypto ouvertes en même temps
-  // ne sont pas vraiment une diversification (elles bougent souvent ensemble).
   if (candidate.assetType === "crypto") {
     const openCrypto = getOpenTrades(h).filter((t) => t.assetType === "crypto").length;
     if (openCrypto >= 3) {
@@ -292,7 +291,7 @@ export function checkGuidance(candidate, { history, settings } = {}) {
     }
   }
 
-    // Corrélation forex : les paires majeures cotées contre l'USD (EUR, GBP,
+  // Corrélation forex : les paires majeures cotées contre l'USD (EUR, GBP,
   // NZD, AUD, CAD...) bougent souvent ensemble contre le dollar — plusieurs
   // positions forex simultanées ne sont pas non plus une vraie diversification.
   if (candidate.assetType === "forex") {
@@ -303,17 +302,6 @@ export function checkGuidance(candidate, { history, settings } = {}) {
       );
     }
   }
-
-  // Dépassement du budget journalier
-  const remainingBudget = todayRemainingBudget(h, s, dateKey);
-  if ((candidate.invested || 0) > remainingBudget) {
-    warnings.push(
-      `Budget du jour : il te reste ${remainingBudget.toFixed(2)} € sur ${s.dailyBudget} €, mais tu investis ${(candidate.invested || 0).toFixed(2)} € sur ce trade.`
-    );
-  }
-
-  return warnings;
-}
 
   // Dépassement du budget journalier
   const remainingBudget = todayRemainingBudget(h, s, dateKey);
