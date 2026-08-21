@@ -766,8 +766,8 @@ async function runMarketAnalysis(type, query) {
   // réellement — voir la note plus haut sur le crash que ça provoquait quand
   // ce changement avait été appliqué par erreur dans la branche or/argent.)
   let verdict = "mitigé";
-  if (bull - bear >= 3) verdict = "haussier";
-  else if (bear - bull >= 3) verdict = "baissier";
+if (bull - bear >= 2) verdict = "haussier";
+else if (bear - bull >= 2) verdict = "baissier";
 
   if (verdict === "haussier" && rsi != null && rsi > 75) verdict = "mitigé";
   if (verdict === "baissier" && rsi != null && rsi < 25) verdict = "mitigé";
@@ -809,7 +809,8 @@ async function runMarketAnalysis(type, query) {
       : null;
 
   const reasoning = [
-    trendLabel && `EMA20/EMA50 : tendance ${trendLabel}`,
+  `Score directionnel : bull ${bull.toFixed(1)} / bear ${bear.toFixed(1)} (écart ${(bull - bear).toFixed(1)}, seuil ${2})`,
+  trendLabel && `EMA20/EMA50 : tendance ${trendLabel}`,
     adxLast != null &&
       `ADX ${adxLast.toFixed(0)} (${adxLast > 20 ? "tendance significative" : "pas de tendance nette"}), +DI ${plusDILast?.toFixed(0)} / -DI ${minusDILast?.toFixed(0)}`,
     cloudTop != null
