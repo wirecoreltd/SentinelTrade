@@ -292,7 +292,7 @@ export function checkGuidance(candidate, { history, settings } = {}) {
     }
   }
 
-  // Corrélation forex : les paires majeures cotées contre l'USD (EUR, GBP,
+    // Corrélation forex : les paires majeures cotées contre l'USD (EUR, GBP,
   // NZD, AUD, CAD...) bougent souvent ensemble contre le dollar — plusieurs
   // positions forex simultanées ne sont pas non plus une vraie diversification.
   if (candidate.assetType === "forex") {
@@ -302,6 +302,14 @@ export function checkGuidance(candidate, { history, settings } = {}) {
         `${openForex} position(s) forex déjà ouverte(s) — les paires majeures sont souvent corrélées entre elles contre l'USD, ce nouveau trade ajoute du risque groupé plutôt que de la diversification.`
       );
     }
+  }
+
+  // Dépassement du budget journalier
+  const remainingBudget = todayRemainingBudget(h, s, dateKey);
+  if ((candidate.invested || 0) > remainingBudget) {
+    warnings.push(
+      `Budget du jour : il te reste ${remainingBudget.toFixed(2)} € sur ${s.dailyBudget} €, mais tu investis ${(candidate.invested || 0).toFixed(2)} € sur ce trade.`
+    );
   }
 
   return warnings;
