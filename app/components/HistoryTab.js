@@ -303,7 +303,6 @@ function CompactTradeRow({ trade, currentPrice, isLivePrice, onCloseWithResult, 
           </div>
         )
       )}
-      )}
     </div>
   );
 }
