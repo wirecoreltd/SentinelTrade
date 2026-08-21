@@ -2215,9 +2215,25 @@ function Calculateur({ prefill }) {
   const [assetType, setAssetType] = useState(prefill?.assetType || "crypto");
   const [invested, setInvested] = useState(prefill?.invested?.toString() || "50");
   const [leverage, setLeverage] = useState(prefill?.leverage?.toString() || LEVERAGE_PRESETS[prefill?.assetType || "crypto"].leverage.toString());
-  const [entry, setEntry] = useState(prefill?.entry?.toString() || "");
+    const [entry, setEntry] = useState(prefill?.entry?.toString() || "");
   const [stop, setStop] = useState(prefill?.stop?.toString() || "");
   const [takeProfit, setTakeProfit] = useState(prefill?.takeProfit?.toString() || "");
+
+  // --- Trailing stop (aide à la décision, n'exécute rien sur le broker) ---
+  const [trailingEnabled, setTrailingEnabled] = useState(false);
+  const [trailStartR, setTrailStartR] = useState("1");
+  const [trailDistanceR, setTrailDistanceR] = useState("1");
+
+  // Prix live disponible uniquement pour les cryptos suivies (WebSocket
+  // Binance, même source que le Dossier et le Top Crypto).
+  const trailLiveId =
+    prefill?.assetType === "crypto" && prefill?.rawQuery && getBinanceSymbol(prefill.rawQuery)
+      ? prefill.rawQuery.toLowerCase()
+      : null;
+  const trailLivePrices = useBinanceLivePrices(trailLiveId ? [trailLiveId] : []);
+  const liveCurrentPrice = trailLiveId ? trailLivePrices[trailLiveId] ?? null : null;
+
+  // --- Historique / garde-fous ---
 
   // --- Historique / garde-fous ---
   const [guidanceWarnings, setGuidanceWarnings] = useState([]);
@@ -2282,9 +2298,36 @@ function Calculateur({ prefill }) {
   const distancePct = valid ? (distance / e) * 100 : null;
   const lossAmount = valid ? quantity * distance : null;
   const lossPctOfInvested = valid ? (lossAmount / inv) * 100 : null;
-  const gainAmount = valid && tp > 0 ? quantity * Math.abs(tp - e) : null;
+    const gainAmount = valid && tp > 0 ? quantity * Math.abs(tp - e) : null;
   const gainDistance = valid && tp > 0 ? Math.abs(tp - e) : null;
   const gainDistancePct = valid && tp > 0 ? (gainDistance / e) * 100 : null;
+
+  // R = distance entrée→stop initiale, unité de mesure du profit en "multiples de risque".
+  // isLongTrade se base sur prefill.direction si connu, sinon sur la position du stop.
+  const isLongTrade = prefill?.direction ? prefill.direction !== "short" : (valid ? s < e : true);
+  const riskR = valid ? Math.abs(e - s) : null;
+  const startR = parseFloat(trailStartR);
+  const distR = parseFloat(trailDistanceR);
+
+  let profitR = null;
+  let recommendedStop = null;
+  let trailingActive = false;
+
+  if (trailingEnabled && valid && riskR > 0 && liveCurrentPrice != null && Number.isFinite(startR) && Number.isFinite(distR)) {
+    profitR = isLongTrade ? (liveCurrentPrice - e) / riskR : (e - liveCurrentPrice) / riskR;
+
+    if (profitR >= startR) {
+      trailingActive = true;
+      const candidate = isLongTrade ? liveCurrentPrice - distR * riskR : liveCurrentPrice + distR * riskR;
+      // Le stop ne recule jamais, il ne fait que se resserrer dans le sens du profit.
+      recommendedStop = isLongTrade ? Math.max(s, candidate) : Math.min(s, candidate);
+    }
+  }
+
+  const shouldUpdateStop =
+    recommendedStop != null &&
+    Math.abs(recommendedStop - s) > 1e-9 &&
+    (isLongTrade ? recommendedStop > s : recommendedStop < s);
 
   const field = (label, value, onChange, placeholder, locked = autoLocked) => (
     <CalcField label={label} value={value} onChange={onChange} placeholder={placeholder} readOnly={locked} />
@@ -2418,10 +2461,87 @@ function Calculateur({ prefill }) {
           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}><span style={{ fontSize: 13, color: MUTED }}>Marge requise</span><span style={{ fontSize: 14, fontWeight: 700 }}>{inv.toFixed(2)} €</span></div>
           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}><span style={{ fontSize: 13, color: MUTED }}>Perte si stop touché</span><span style={{ fontSize: 14, fontWeight: 700, color: NEG }}>-{lossAmount.toFixed(2)} € ({lossPctOfInvested.toFixed(0)}% de ta mise)</span></div>
           {gainAmount !== null && <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: 13, color: MUTED }}>Gain si take-profit touché</span><span style={{ fontSize: 14, fontWeight: 700, color: POS }}>+{gainAmount.toFixed(2)} €</span></div>}
-          {lossPctOfInvested > 100 && <div style={{ fontSize: 11, color: NEG, marginTop: 10 }}>⚠️ La perte potentielle dépasse ta mise de départ — avec ce levier, ta position peut être liquidée avant que le stop ne soit atteint. Réduis le levier ou resserre le stop.</div>}
+                    {lossPctOfInvested > 100 && <div style={{ fontSize: 11, color: NEG, marginTop: 10 }}>⚠️ La perte potentielle dépasse ta mise de départ — avec ce levier, ta position peut être liquidée avant que le stop ne soit atteint. Réduis le levier ou resserre le stop.</div>}
         </div>
       ) : (
         <div style={{ fontSize: 12, color: MUTED, marginTop: 8 }}>{autoLocked && prefill?.symbol ? "Le moteur n'a pas fourni tous les niveaux nécessaires pour calculer automatiquement ce trade. Passe en mode Manuel pour définir les niveaux." : "Remplis montant, levier, entrée et stop-loss pour voir le calcul."}</div>
+      )}
+
+      {valid && (
+        <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 16, marginTop: 12 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+            <div style={{ fontSize: 12, color: ACCENT, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5 }}>
+              Trailing Stop (aide à la décision)
+            </div>
+            <button
+              onClick={() => setTrailingEnabled((v) => !v)}
+              style={{ padding: "5px 10px", borderRadius: 20, border: `1px solid ${trailingEnabled ? ACCENT : LINE}`, background: trailingEnabled ? "rgba(79,140,255,0.12)" : "transparent", color: trailingEnabled ? ACCENT : MUTED, fontSize: 11, fontWeight: 700, cursor: "pointer" }}
+            >
+              {trailingEnabled ? "Activé" : "Désactivé"}
+            </button>
+          </div>
+
+          {trailingEnabled && (
+            <>
+              <div style={{ fontSize: 11, color: MUTED, marginBottom: 10, lineHeight: 1.5 }}>
+                Une fois le prix à <strong style={{ color: TEXT }}>+{trailStartR || "?"}R</strong> de profit, le stop suggéré suit le prix à <strong style={{ color: TEXT }}>{trailDistanceR || "?"}R</strong> de distance — il ne recule jamais, seulement resserre. L'app ne modifie rien sur Capital.com : reporte le nouveau stop toi-même si tu valides.
+              </div>
+
+              <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 11, color: MUTED, marginBottom: 4 }}>Déclenchement (R)</div>
+                  <input value={trailStartR} onChange={(e) => setTrailStartR(e.target.value)} inputMode="decimal" style={{ width: "100%", background: NAVY, border: `1px solid ${LINE}`, borderRadius: 8, padding: "8px 10px", color: TEXT, fontSize: 13 }} />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 11, color: MUTED, marginBottom: 4 }}>Distance de suivi (R)</div>
+                  <input value={trailDistanceR} onChange={(e) => setTrailDistanceR(e.target.value)} inputMode="decimal" style={{ width: "100%", background: NAVY, border: `1px solid ${LINE}`, borderRadius: 8, padding: "8px 10px", color: TEXT, fontSize: 13 }} />
+                </div>
+              </div>
+
+              {liveCurrentPrice == null ? (
+                <div style={{ fontSize: 12, color: MUTED }}>
+                  Prix live indisponible pour cet actif ici (disponible pour les cryptos suivies). Vérifie le prix sur Capital.com pour appliquer la règle manuellement.
+                </div>
+              ) : (
+                <>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+                    <span style={{ fontSize: 12, color: MUTED }}>Prix actuel (live)</span>
+                    <span style={{ fontSize: 13, fontWeight: 700 }}>{formatPrice(liveCurrentPrice)}</span>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
+                    <span style={{ fontSize: 12, color: MUTED }}>Profit actuel</span>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: profitR >= 0 ? POS : NEG }}>
+                      {profitR != null ? `${profitR >= 0 ? "+" : ""}${profitR.toFixed(2)}R` : "—"}
+                    </span>
+                  </div>
+
+                  {!trailingActive ? (
+                    <div style={{ fontSize: 12, color: MUTED }}>
+                      Pas encore atteint le seuil de déclenchement (+{trailStartR}R) — stop actuel inchangé à {formatPrice(s)}.
+                    </div>
+                  ) : (
+                    <div style={{ background: NAVY, borderRadius: 8, padding: 10 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+                        <span style={{ fontSize: 12, color: MUTED }}>Stop suggéré maintenant</span>
+                        <span style={{ fontSize: 14, fontWeight: 800, color: POS }}>{formatPrice(recommendedStop)}</span>
+                      </div>
+                      {shouldUpdateStop ? (
+                        <button
+                          onClick={() => setStop(recommendedStop.toString())}
+                          style={{ width: "100%", background: "rgba(61,214,140,0.14)", border: `1px solid ${POS}`, color: POS, borderRadius: 8, padding: "8px 0", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
+                        >
+                          Appliquer ce stop dans le champ ci-dessus
+                        </button>
+                      ) : (
+                        <div style={{ fontSize: 11, color: MUTED }}>Le stop actuel ({formatPrice(s)}) est déjà à jour ou plus favorable.</div>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+            </>
+          )}
+        </div>
       )}
 
       {valid && (
