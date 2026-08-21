@@ -607,7 +607,15 @@ async function runMarketAnalysis(type, query) {
     newsError = e.message;
   }
 
-    if (!history || history.length < 60) {
+  if (!history || history.length < 60) {
+    // Historique insuffisant (typiquement or/argent, ou actif tout juste
+    // ajouté) : pas d'EMA/ADX/RSI/structure disponibles ici, donc le verdict
+    // reste basé uniquement sur le sentiment des actualités — comme avant.
+    // NE PAS utiliser bull/bear ici : ces variables ne sont calculées que
+    // plus bas, dans la branche avec historique complet. Les utiliser ici
+    // provoquait un crash ("Cannot access 'bull' before initialization"),
+    // ce qui faisait échouer silencieusement l'analyse de ces actifs et les
+    // faisait retomber en WAIT par défaut.
     let verdict = "mitigé";
     if (news?.label === "positif") verdict = "haussier";
     else if (news?.label === "négatif") verdict = "baissier";
@@ -751,9 +759,12 @@ async function runMarketAnalysis(type, query) {
   if (news?.label === "positif") bull += 0.5;
   else if (news?.label === "négatif") bear += 0.5;
 
-    // Seuil resserré de 2 à 3 : les données de ton historique de trades montrent
+  // Seuil resserré de 2 à 3 : les données de l'historique de trades montrent
   // 83% de réussite sur "haussier" contre seulement 50% sur "mitigé" — on ne
   // garde que les signaux forts pour réduire le nombre de faux positifs.
+  // (C'est ici, dans la branche à historique complet, que bull/bear existent
+  // réellement — voir la note plus haut sur le crash que ça provoquait quand
+  // ce changement avait été appliqué par erreur dans la branche or/argent.)
   let verdict = "mitigé";
   if (bull - bear >= 3) verdict = "haussier";
   else if (bear - bull >= 3) verdict = "baissier";
@@ -2215,7 +2226,7 @@ function Calculateur({ prefill }) {
   const [assetType, setAssetType] = useState(prefill?.assetType || "crypto");
   const [invested, setInvested] = useState(prefill?.invested?.toString() || "50");
   const [leverage, setLeverage] = useState(prefill?.leverage?.toString() || LEVERAGE_PRESETS[prefill?.assetType || "crypto"].leverage.toString());
-    const [entry, setEntry] = useState(prefill?.entry?.toString() || "");
+  const [entry, setEntry] = useState(prefill?.entry?.toString() || "");
   const [stop, setStop] = useState(prefill?.stop?.toString() || "");
   const [takeProfit, setTakeProfit] = useState(prefill?.takeProfit?.toString() || "");
 
@@ -2232,8 +2243,6 @@ function Calculateur({ prefill }) {
       : null;
   const trailLivePrices = useBinanceLivePrices(trailLiveId ? [trailLiveId] : []);
   const liveCurrentPrice = trailLiveId ? trailLivePrices[trailLiveId] ?? null : null;
-
-  // --- Historique / garde-fous ---
 
   // --- Historique / garde-fous ---
   const [guidanceWarnings, setGuidanceWarnings] = useState([]);
@@ -2298,7 +2307,7 @@ function Calculateur({ prefill }) {
   const distancePct = valid ? (distance / e) * 100 : null;
   const lossAmount = valid ? quantity * distance : null;
   const lossPctOfInvested = valid ? (lossAmount / inv) * 100 : null;
-    const gainAmount = valid && tp > 0 ? quantity * Math.abs(tp - e) : null;
+  const gainAmount = valid && tp > 0 ? quantity * Math.abs(tp - e) : null;
   const gainDistance = valid && tp > 0 ? Math.abs(tp - e) : null;
   const gainDistancePct = valid && tp > 0 ? (gainDistance / e) * 100 : null;
 
@@ -2461,7 +2470,7 @@ function Calculateur({ prefill }) {
           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}><span style={{ fontSize: 13, color: MUTED }}>Marge requise</span><span style={{ fontSize: 14, fontWeight: 700 }}>{inv.toFixed(2)} €</span></div>
           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}><span style={{ fontSize: 13, color: MUTED }}>Perte si stop touché</span><span style={{ fontSize: 14, fontWeight: 700, color: NEG }}>-{lossAmount.toFixed(2)} € ({lossPctOfInvested.toFixed(0)}% de ta mise)</span></div>
           {gainAmount !== null && <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: 13, color: MUTED }}>Gain si take-profit touché</span><span style={{ fontSize: 14, fontWeight: 700, color: POS }}>+{gainAmount.toFixed(2)} €</span></div>}
-                    {lossPctOfInvested > 100 && <div style={{ fontSize: 11, color: NEG, marginTop: 10 }}>⚠️ La perte potentielle dépasse ta mise de départ — avec ce levier, ta position peut être liquidée avant que le stop ne soit atteint. Réduis le levier ou resserre le stop.</div>}
+          {lossPctOfInvested > 100 && <div style={{ fontSize: 11, color: NEG, marginTop: 10 }}>⚠️ La perte potentielle dépasse ta mise de départ — avec ce levier, ta position peut être liquidée avant que le stop ne soit atteint. Réduis le levier ou resserre le stop.</div>}
         </div>
       ) : (
         <div style={{ fontSize: 12, color: MUTED, marginTop: 8 }}>{autoLocked && prefill?.symbol ? "Le moteur n'a pas fourni tous les niveaux nécessaires pour calculer automatiquement ce trade. Passe en mode Manuel pour définir les niveaux." : "Remplis montant, levier, entrée et stop-loss pour voir le calcul."}</div>
