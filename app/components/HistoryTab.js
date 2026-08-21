@@ -12,7 +12,7 @@
 // ============================================================================
 
 import { useEffect, useMemo, useState, useCallback } from "react";
-import { Trash2, TrendingUp, TrendingDown, CircleDot, Check, X, RefreshCw, Pencil } from "lucide-react";
+import { Trash2, TrendingUp, TrendingDown, CircleDot, Check, X, Pencil } from "lucide-react";
 import { NAVY, PANEL, ACCENT, TEXT, MUTED, LINE, POS, NEG, AMBER } from "../lib/theme";
 import { formatPrice } from "../lib/format";
 import { useBinanceLivePrices } from "../lib/binance";
