@@ -12,7 +12,7 @@
 // ============================================================================
 
 import { useEffect, useMemo, useState, useCallback } from "react";
-import { Trash2, TrendingUp, TrendingDown, CircleDot, Check, X, Pencil } from "lucide-react";
+import { Trash2, TrendingUp, TrendingDown, CircleDot, Check, X, Pencil, RefreshCw } from "lucide-react";
 import { NAVY, PANEL, ACCENT, TEXT, MUTED, LINE, POS, NEG, AMBER } from "../lib/theme";
 import { formatPrice } from "../lib/format";
 import { useBinanceLivePrices } from "../lib/binance";
@@ -148,7 +148,18 @@ function SummaryCard({ label, value, sub, danger, editable, onSave }) {
 
 function CompactTradeRow({ trade, currentPrice, isLivePrice, onCloseWithResult, onCloseNoResult, onDelete, nested = false }) {
   const [closing, setClosing] = useState(false);
+  const [editing, setEditing] = useState(false);
   const [exitInput, setExitInput] = useState("");
+  const [editInput, setEditInput] = useState(trade.exitPrice?.toString() || "");
+
+  const parsedEdit = parseFloat(editInput);
+  const editValid = Number.isFinite(parsedEdit) && parsedEdit > 0;
+
+  const confirmEdit = () => {
+    if (!editValid) return;
+    onCloseWithResult(trade.id, parsedEdit);
+    setEditing(false);
+  };
 
   const isLong = trade.direction !== "short";
   const DirIcon = isLong ? TrendingUp : TrendingDown;
@@ -264,11 +275,34 @@ function CompactTradeRow({ trade, currentPrice, isLivePrice, onCloseWithResult, 
         )
       )}
       {!isOpen && (
-        <div style={{ display: "flex", justifyContent: "flex-end" }}>
-          <button onClick={() => onDelete(trade.id)} title="Supprimer" style={{ width: 30, height: 26, display: "flex", alignItems: "center", justifyContent: "center", background: "transparent", border: `1px solid ${LINE}`, color: MUTED, borderRadius: 8, cursor: "pointer" }}>
-            <Trash2 size={12} />
-          </button>
-        </div>
+        editing ? (
+          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            <input
+              value={editInput}
+              onChange={(e) => setEditInput(e.target.value)}
+              placeholder="Vrai prix de sortie"
+              inputMode="decimal"
+              autoFocus
+              style={{ flex: 1, background: NAVY, border: `1px solid ${LINE}`, borderRadius: 8, padding: "7px 9px", color: TEXT, fontSize: 12 }}
+            />
+            <button onClick={confirmEdit} disabled={!editValid} style={{ width: 30, height: 30, display: "flex", alignItems: "center", justifyContent: "center", background: editValid ? "rgba(61,214,140,0.14)" : "transparent", border: `1px solid ${editValid ? POS : LINE}`, color: editValid ? POS : MUTED, borderRadius: 8, cursor: editValid ? "pointer" : "not-allowed" }} title="Confirmer">
+              <Check size={13} />
+            </button>
+            <button onClick={() => { setEditing(false); setEditInput(trade.exitPrice?.toString() || ""); }} style={{ width: 30, height: 30, display: "flex", alignItems: "center", justifyContent: "center", background: "transparent", border: `1px solid ${LINE}`, color: MUTED, borderRadius: 8, cursor: "pointer" }} title="Annuler">
+              <X size={13} />
+            </button>
+          </div>
+        ) : (
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 6 }}>
+            <button onClick={() => setEditing(true)} title="Modifier le prix de sortie" style={{ width: 30, height: 26, display: "flex", alignItems: "center", justifyContent: "center", background: "transparent", border: `1px solid ${LINE}`, color: MUTED, borderRadius: 8, cursor: "pointer" }}>
+              <Pencil size={12} />
+            </button>
+            <button onClick={() => onDelete(trade.id)} title="Supprimer" style={{ width: 30, height: 26, display: "flex", alignItems: "center", justifyContent: "center", background: "transparent", border: `1px solid ${LINE}`, color: MUTED, borderRadius: 8, cursor: "pointer" }}>
+              <Trash2 size={12} />
+            </button>
+          </div>
+        )
+      )}
       )}
     </div>
   );
