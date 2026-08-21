@@ -281,6 +281,8 @@ export function checkGuidance(candidate, { history, settings } = {}) {
 
   // Corrélation crypto : plusieurs positions crypto ouvertes en même temps
   // ne sont pas vraiment une diversification (elles bougent souvent ensemble).
+    // Corrélation crypto : plusieurs positions crypto ouvertes en même temps
+  // ne sont pas vraiment une diversification (elles bougent souvent ensemble).
   if (candidate.assetType === "crypto") {
     const openCrypto = getOpenTrades(h).filter((t) => t.assetType === "crypto").length;
     if (openCrypto >= 3) {
@@ -289,6 +291,21 @@ export function checkGuidance(candidate, { history, settings } = {}) {
       );
     }
   }
+
+  // Corrélation forex : les paires majeures cotées contre l'USD (EUR, GBP,
+  // NZD, AUD, CAD...) bougent souvent ensemble contre le dollar — plusieurs
+  // positions forex simultanées ne sont pas non plus une vraie diversification.
+  if (candidate.assetType === "forex") {
+    const openForex = getOpenTrades(h).filter((t) => t.assetType === "forex").length;
+    if (openForex >= 2) {
+      warnings.push(
+        `${openForex} position(s) forex déjà ouverte(s) — les paires majeures sont souvent corrélées entre elles contre l'USD, ce nouveau trade ajoute du risque groupé plutôt que de la diversification.`
+      );
+    }
+  }
+
+  return warnings;
+}
 
   // Dépassement du budget journalier
   const remainingBudget = todayRemainingBudget(h, s, dateKey);
