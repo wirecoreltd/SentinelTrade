@@ -607,13 +607,10 @@ async function runMarketAnalysis(type, query) {
     newsError = e.message;
   }
 
-  if (!history || history.length < 60) {
-    // Seuil resserré de 2 à 3 : les données de ton historique de trades montrent
-    // 83% de réussite sur "haussier" contre seulement 50% sur "mitigé" — on ne
-    // garde que les signaux forts pour réduire le nombre de faux positifs.
+    if (!history || history.length < 60) {
     let verdict = "mitigé";
-    if (bull - bear >= 3) verdict = "haussier";
-    else if (bear - bull >= 3) verdict = "baissier";
+    if (news?.label === "positif") verdict = "haussier";
+    else if (news?.label === "négatif") verdict = "baissier";
 
     const levelsDirection = verdict === "baissier" ? "baissier" : "haussier";
 
@@ -754,9 +751,12 @@ async function runMarketAnalysis(type, query) {
   if (news?.label === "positif") bull += 0.5;
   else if (news?.label === "négatif") bear += 0.5;
 
+    // Seuil resserré de 2 à 3 : les données de ton historique de trades montrent
+  // 83% de réussite sur "haussier" contre seulement 50% sur "mitigé" — on ne
+  // garde que les signaux forts pour réduire le nombre de faux positifs.
   let verdict = "mitigé";
-  if (bull - bear >= 2) verdict = "haussier";
-  else if (bear - bull >= 2) verdict = "baissier";
+  if (bull - bear >= 3) verdict = "haussier";
+  else if (bear - bull >= 3) verdict = "baissier";
 
   if (verdict === "haussier" && rsi != null && rsi > 75) verdict = "mitigé";
   if (verdict === "baissier" && rsi != null && rsi < 25) verdict = "mitigé";
