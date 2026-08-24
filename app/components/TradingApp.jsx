@@ -1956,7 +1956,7 @@ function TopMarkets({ watchlist, scanState, onSendToCalculator, onGoToHistorique
 
       {results.length > 0 && (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {results.map((r) => {
+                    {results.map((r) => {
             const { name, ticker } = splitLabel(r.label);
 
             if (r.error) {
@@ -1978,32 +1978,35 @@ function TopMarkets({ watchlist, scanState, onSendToCalculator, onGoToHistorique
             const matchedTrade = openTrades.find(
               (t) => t.symbol === resultSymbol && t.assetType === resultAssetType
             );
-            // On utilise le prix live pour la détection stop/TP touché (plus fiable
-            // qu'un prix figé au moment du scan) ; le verdict technique (r.verdict)
-            // reste celui du scan, il n'a pas besoin d'être temps réel.
             const guidance = matchedTrade
               ? computePositionGuidance(matchedTrade, { ...r, price: displayPrice })
               : null;
 
-            const action = guidance ? POSITION_BADGE[guidance.key] : ACTION_MAP[r.verdict] || ACTION_MAP["mitigé"];
+            // Source de vérité pour l'action affichée : sentinel.status (VALID/WAIT/AVOID)
+            // quand disponible. Fallback sur l'ancien verdict bull/bear uniquement pour les
+            // actifs sans historique suffisant (or/argent, actif tout juste ajouté), où
+            // sentinel est null par construction.
+            const status = r.sentinel?.status;
+            const action = guidance
+              ? POSITION_BADGE[guidance.key]
+              : status === "VALID"
+              ? { label: "GO", color: POS }
+              : status === "WAIT"
+              ? { label: "WAIT", color: MUTED }
+              : status === "AVOID"
+              ? { label: "AVOID", color: NEG }
+              : ACTION_MAP[r.verdict] || ACTION_MAP["mitigé"];
 
             const isBearishLevels = r.levelsDirection === "baissier";
-            const buyPrice = r.price; // prix du scan, cohérent avec stop/TP/R:R (le prix live reste affiché en haut de carte)
+            const buyPrice = r.price;
             const sellPrice = r.takeProfit;
             const stopPrice = isBearishLevels ? r.atrStopShort : r.atrStop;
-            const hasLevels = !guidance && sellPrice != null && stopPrice != null;
+            // AVOID (score Sentinel insuffisant) : on n'affiche plus les niveaux comme si
+            // c'était un setup exploitable, même si le calcul brut existe en coulisses.
+            const hasLevels = !guidance && status !== "AVOID" && sellPrice != null && stopPrice != null;
             const hasChange = r.change24h != null;
-            const hasRR = !guidance && r.riskReward != null && Number.isFinite(r.riskReward);
+            const hasRR = !guidance && status !== "AVOID" && r.riskReward != null && Number.isFinite(r.riskReward);
 
-            // Pour une position déjà ouverte gérée depuis l'Historique
-            // (stop/objectif proche ou atteint, ou retournement), le clic
-            // amène vers l'onglet Historique plutôt que de proposer un
-            // nouveau trade. "Renforcer" pré-remplit le Calculateur en
-            // combinant l'historique (montant investi, levier, sens, actif
-            // — tirés du trade ouvert lui-même) et l'analyse en cours de
-            // l'appli (prix d'entrée, stop, take-profit recalculés à
-            // l'instant T par le moteur). L'absence de position ouverte
-            // envoie vers le Calculateur comme pour un nouveau trade.
             const handleClick = () => {
               if (guidance && guidance.key !== "renforcer" && guidance.key !== "patienter") {
                 onGoToHistorique();
@@ -2011,37 +2014,42 @@ function TopMarkets({ watchlist, scanState, onSendToCalculator, onGoToHistorique
               }
 
               if (guidance && guidance.key === "renforcer") {
-              const isLong = matchedTrade.direction !== "short";
+                const isLong = matchedTrade.direction !== "short";
+                onSendToCalculator({
+                  entry: r.price,
+                  stop: isLong ? r.atrStop : r.atrStopShort,
+                  takeProfit: r.takeProfit,
+                  support: r.support,
+                  resistance: r.resistance,
+                  assetType: matchedTrade.assetType,
+                  direction: matchedTrade.direction,
+                  symbol: matchedTrade.symbol,
+                  rawQuery: r.rawQuery || r.query,
+                  verdict: r.verdict,
+                  invested: matchedTrade.invested,
+                  leverage: matchedTrade.leverage,
+                });
+                return;
+              }
+
+              // Setup jugé à éviter par le moteur : pas d'ouverture de nouvelle position
+              // depuis cette carte. L'utilisateur peut toujours passer par le Dossier ou
+              // le mode Manuel du calculateur s'il veut vraiment l'analyser en détail.
+              if (status === "AVOID") return;
+
               onSendToCalculator({
-                entry: r.price, // prix du scan, cohérent avec le stop/TP ci-dessous (pas le prix live)
-                stop: isLong ? r.atrStop : r.atrStopShort,
-                takeProfit: r.takeProfit,
+                entry: r.price,
+                stop: stopPrice,
+                takeProfit: sellPrice,
                 support: r.support,
                 resistance: r.resistance,
-                assetType: matchedTrade.assetType,
-                direction: matchedTrade.direction,
-                symbol: matchedTrade.symbol,
+                assetType: resultAssetType,
+                direction: isBearishLevels ? "short" : "long",
+                symbol: resultSymbol,
                 rawQuery: r.rawQuery || r.query,
                 verdict: r.verdict,
-                invested: matchedTrade.invested,
-                leverage: matchedTrade.leverage,
               });
-              return;
-            }
-      
-            onSendToCalculator({
-              entry: r.price, // prix du scan, cohérent avec le stop/TP ci-dessous (pas le prix live)
-              stop: stopPrice,
-              takeProfit: sellPrice,
-              support: r.support,
-              resistance: r.resistance,
-              assetType: resultAssetType,
-              direction: isBearishLevels ? "short" : "long",
-              symbol: resultSymbol,
-              rawQuery: r.rawQuery || r.query,
-              verdict: r.verdict,
-            });
-          };
+            };
 
             return (
               <button
@@ -2052,7 +2060,8 @@ function TopMarkets({ watchlist, scanState, onSendToCalculator, onGoToHistorique
                   border: `1px solid ${LINE}`,
                   borderRadius: 10,
                   padding: "12px 14px",
-                  cursor: "pointer",
+                  cursor: status === "AVOID" && !guidance ? "default" : "pointer",
+                  opacity: status === "AVOID" && !guidance ? 0.7 : 1,
                   color: TEXT,
                   textAlign: "left",
                   width: "100%",
@@ -2144,6 +2153,7 @@ function TopMarkets({ watchlist, scanState, onSendToCalculator, onGoToHistorique
               </button>
             );
           })}
+
         </div>
       )}
     </div>
