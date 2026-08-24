@@ -31,6 +31,25 @@ function isFiniteNum(v) {
   return typeof v === "number" && Number.isFinite(v);
 }
 
+function safeLocalStorageGet(key) {
+  if (!isBrowser()) return null;
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function safeLocalStorageSet(key, value) {
+  if (!isBrowser()) return;
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    // storage indisponible (navigation privée iOS, webview restreinte, quota
+    // dépassé...) : on continue sans persister, plutôt que de faire planter l'appli
+  }
+}
+
 function safeParse(json, fallback) {
   try {
     const v = JSON.parse(json);
@@ -50,23 +69,19 @@ export function toLocalDateKey(d = new Date()) {
 // ---------- Lecture / écriture brute ----------
 
 export function loadHistory() {
-  if (!isBrowser()) return [];
-  return safeParse(window.localStorage.getItem(HISTORY_KEY), []);
+  return safeParse(safeLocalStorageGet(HISTORY_KEY), []);
 }
 
 function saveHistory(list) {
-  if (!isBrowser()) return;
-  window.localStorage.setItem(HISTORY_KEY, JSON.stringify(list));
+  safeLocalStorageSet(HISTORY_KEY, JSON.stringify(list));
 }
 
 export function loadSettings() {
-  if (!isBrowser()) return DEFAULT_SETTINGS;
-  return { ...DEFAULT_SETTINGS, ...safeParse(window.localStorage.getItem(SETTINGS_KEY), {}) };
+  return { ...DEFAULT_SETTINGS, ...safeParse(safeLocalStorageGet(SETTINGS_KEY), {}) };
 }
 
 export function saveSettings(settings) {
-  if (!isBrowser()) return;
-  window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  safeLocalStorageSet(SETTINGS_KEY, JSON.stringify(settings));
 }
 
 // ---------- Ajout / mise à jour d'un trade ----------
