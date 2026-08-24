@@ -209,7 +209,11 @@ function calculateEntryScore(data) {
     reasons.push("Multiple entry conditions agree");
   }
   if (activeSetups === 0) {
-    score = 3;
+    // Avant : score forcé à 3/15 quel que soit le reste, ce qui rendait un
+    // VALID quasi impossible dès qu'aucun pattern d'entrée précis n'était
+    // détecté. Absence de setup ≠ absence de qualité — les autres familles
+    // (direction, structure, R:R...) restent des preuves valables.
+    score = Math.min(score, 6);
     warnings.push("No defined entry setup detected");
   }
 
@@ -423,9 +427,12 @@ export function calculateSentinelScore(data = {}) {
     ...risk.reasons,
   ];
 
+  // Seuils assouplis : le marché "parfait" (tous les facteurs alignés à la
+  // fois) n'existe quasiment jamais. VALID doit signaler un bon setup, pas
+  // un setup exceptionnel.
   let status = "AVOID";
-  if (score >= 75 && warnings.length <= 3) status = "VALID";
-  else if (score >= 55) status = "WAIT";
+  if (score >= 65 && warnings.length <= 4) status = "VALID";
+  else if (score >= 45) status = "WAIT";
 
   return {
     score,
