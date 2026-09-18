@@ -616,11 +616,9 @@ async function runMarketAnalysis(type, query) {
     // provoquait un crash ("Cannot access 'bull' before initialization"),
     // ce qui faisait échouer silencieusement l'analyse de ces actifs et les
     // faisait retomber en WAIT par défaut.
-    // Seuil resserré à 3 : 83% de réussite historique sur "haussier" contre
-// 50% sur "mitigé" — on ne garde que les signaux forts.
-let verdict = "mitigé";
-if (bull - bear >= 3) verdict = "haussier";
-else if (bear - bull >= 3) verdict = "baissier";
+    let verdict = "mitigé";
+    if (news?.label === "positif") verdict = "haussier";
+    else if (news?.label === "négatif") verdict = "baissier";
 
     const levelsDirection = verdict === "baissier" ? "baissier" : "haussier";
 
@@ -768,8 +766,8 @@ else if (bear - bull >= 3) verdict = "baissier";
   // réellement — voir la note plus haut sur le crash que ça provoquait quand
   // ce changement avait été appliqué par erreur dans la branche or/argent.)
   let verdict = "mitigé";
-if (bull - bear >= 2) verdict = "haussier";
-else if (bear - bull >= 2) verdict = "baissier";
+  if (bull - bear >= 3) verdict = "haussier";
+  else if (bear - bull >= 3) verdict = "baissier";
 
   if (verdict === "haussier" && rsi != null && rsi > 75) verdict = "mitigé";
   if (verdict === "baissier" && rsi != null && rsi < 25) verdict = "mitigé";
@@ -811,8 +809,7 @@ else if (bear - bull >= 2) verdict = "baissier";
       : null;
 
   const reasoning = [
-  `Score directionnel : bull ${bull.toFixed(1)} / bear ${bear.toFixed(1)} (écart ${(bull - bear).toFixed(1)}, seuil ${2})`,
-  trendLabel && `EMA20/EMA50 : tendance ${trendLabel}`,
+    trendLabel && `EMA20/EMA50 : tendance ${trendLabel}`,
     adxLast != null &&
       `ADX ${adxLast.toFixed(0)} (${adxLast > 20 ? "tendance significative" : "pas de tendance nette"}), +DI ${plusDILast?.toFixed(0)} / -DI ${minusDILast?.toFixed(0)}`,
     cloudTop != null
@@ -1806,9 +1803,13 @@ function assetTypeForResult(r) {
 }
 
 const POSITION_BADGE = {
-  vendre: { label: "VENDRE", color: NEG },
+  stopTouched: { label: "STOP TOUCHÉ", color: NEG },
+  stopProche: { label: "STOP PROCHE", color: NEG },
+  objectifAtteint: { label: "OBJECTIF ATTEINT", color: POS },
+  cloturer: { label: "CLÔTURER", color: NEG },
+  objectifProche: { label: "OBJECTIF PROCHE", color: POS },
   renforcer: { label: "RENFORCER", color: POS },
-  attendre: { label: "ATTENDRE", color: AMBER },
+  patienter: { label: "PATIENTER", color: AMBER },
 };
 
 function formatTradeDateShort(iso) {
@@ -1821,22 +1822,6 @@ function formatTradeDateShort(iso) {
 // Calcule la recommandation de gestion de position pour un trade ouvert
 // donné, en croisant son entrée/stop/TP avec le prix et le verdict actuels
 // du marché issus du scan Top 15.
-// Recommandation à 3 issues seulement : VENDRE / RENFORCER / ATTENDRE.
-// Utilise le Sentinel Score (bias + status) quand il est disponible — c'est
-// le même filtre de qualité que celui qui décide GO/WAIT/AVOID pour un
-// nouveau trade — et retombe sur le simple verdict bull/bear pour les
-// actifs sans historique suffisant (or, argent : sentinel est null).
-// S'applique à TOUTE position ouverte, qu'elle ait déjà un stop/TP défini
-// ou non : le stop/TP ne fait que déclencher une sortie immédiate, il ne
-// remplace jamais l'analyse de fond.
-// Recommandation à 3 issues seulement : VENDRE / RENFORCER / ATTENDRE.
-// Utilise le Sentinel Score (bias + status) quand il est disponible — c'est
-// le même filtre de qualité que celui qui décide GO/WAIT/AVOID pour un
-// nouveau trade — et retombe sur le simple verdict bull/bear pour les
-// actifs sans historique suffisant (or, argent : sentinel est null).
-// S'applique à TOUTE position ouverte, qu'elle ait déjà un stop/TP défini
-// ou non : le stop/TP ne fait que déclencher une sortie immédiate, il ne
-// remplace jamais l'analyse de fond.
 function computePositionGuidance(trade, r) {
   const isLong = trade.direction !== "short";
   const currentPrice = r.price;
@@ -1851,51 +1836,49 @@ function computePositionGuidance(trade, r) {
   const pnlText = pnlPct != null ? `${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(1)}%` : "—";
   const base = `En position depuis le ${formatTradeDateShort(trade.createdAt)}, entrée $${formatPrice(entryPrice)}, prix actuel $${formatPrice(currentPrice)} (${pnlText}).`;
 
-  // 1. Stop touché → sortie immédiate, priorité absolue.
+  // 1. Stop touché
   if (stopPrice != null && (isLong ? currentPrice <= stopPrice : currentPrice >= stopPrice)) {
-    return { key: "vendre", message: `${base} Le stop-loss ($${formatPrice(stopPrice)}) est touché ou dépassé — protège ton capital.` };
+    return { key: "stopTouched", message: `${base} Le stop-loss ($${formatPrice(stopPrice)}) est touché ou dépassé — protège ton capital.` };
   }
 
-  // 2. Take-profit atteint ou dépassé → sécurise le gain.
-  if (tpPrice != null && (isLong ? currentPrice >= tpPrice : currentPrice <= tpPrice)) {
-    return { key: "vendre", message: `${base} Le take-profit ($${formatPrice(tpPrice)}) est atteint ou dépassé — sécurise les gains.` };
-  }
-
-  // Direction actuelle du marché : Sentinel Score en priorité (même filtre
-  // de qualité qu'un nouveau trade), verdict simple en repli pour les
-  // actifs sans analyse Sentinel (or/argent, historique < 60 jours).
-  const sentinelBias = r.sentinel?.bias;
-  const sentinelStatus = r.sentinel?.status;
-  const marketBullish = sentinelBias ? sentinelBias === "bullish" : r.verdict === "haussier";
-  const marketBearish = sentinelBias ? sentinelBias === "bearish" : r.verdict === "baissier";
-  const positionAligned = (isLong && marketBullish) || (!isLong && marketBearish);
-  const positionOpposed = (isLong && marketBearish) || (!isLong && marketBullish);
-  const directionLabel = sentinelBias === "bullish" ? "haussier" : sentinelBias === "bearish" ? "baissier" : r.verdict;
-
-  // 3. Le marché s'est retourné contre la position → vendre pour limiter le risque.
-  if (positionOpposed) {
-    return { key: "vendre", message: `${base} Le marché s'est retourné contre ta position (signal désormais ${directionLabel}) — envisage de vendre pour limiter le risque.` };
-  }
-
-  // 4. Stop proche (moins de 25% de la distance d'entrée au stop) → prudence, pas de renforcement.
+  // 2. Stop proche (moins de 25% de la distance d'entrée au stop)
   if (stopPrice != null) {
     const totalStopDistance = isLong ? entryPrice - stopPrice : stopPrice - entryPrice;
     const distanceToStop = isLong ? currentPrice - stopPrice : stopPrice - currentPrice;
     if (totalStopDistance > 0 && distanceToStop / totalStopDistance <= 0.25) {
-      return { key: "attendre", message: `${base} Prix à ${(100 * distanceToStop / totalStopDistance).toFixed(0)}% de la distance du stop ($${formatPrice(stopPrice)}) — surveille de près, ne renforce pas pour l'instant.` };
+      return { key: "stopProche", message: `${base} Prix à ${(100 * distanceToStop / totalStopDistance).toFixed(0)}% de la distance du stop ($${formatPrice(stopPrice)}) — surveille de près.` };
     }
   }
 
-  // 5. Confirmation forte de la direction → renforcer. Exige un VALID
-  // Sentinel (même barre de qualité qu'un nouveau trade) quand disponible,
-  // sinon le simple alignement de verdict pour les actifs sans Sentinel.
-  const strongConfirmation = sentinelStatus ? sentinelStatus === "VALID" && positionAligned : positionAligned;
-  if (strongConfirmation) {
-    return { key: "renforcer", message: `${base} Signal toujours ${directionLabel}${sentinelStatus ? ` (qualité ${sentinelStatus})` : ""} — tu peux envisager de renforcer la position.` };
+  // 3. Take-profit atteint ou dépassé
+  if (tpPrice != null && (isLong ? currentPrice >= tpPrice : currentPrice <= tpPrice)) {
+    return { key: "objectifAtteint", message: `${base} Le take-profit ($${formatPrice(tpPrice)}) est atteint ou dépassé — envisage de sécuriser les gains.` };
   }
 
-  // 6. Rien de tranché → attendre.
-  return { key: "attendre", message: `${base} Signal neutre ou incertain — patiente avant d'agir.` };
+  const marketBullish = r.verdict === "haussier";
+  const marketBearish = r.verdict === "baissier";
+
+  // 4. Le marché s'est retourné contre la position
+  if ((isLong && marketBearish) || (!isLong && marketBullish)) {
+    return { key: "cloturer", message: `${base} Le marché s'est retourné contre ta position (signal désormais ${r.verdict}) — envisage de clôturer pour limiter le risque.` };
+  }
+
+  // 5. Take-profit proche (moins de 25% de la distance restante)
+  if (tpPrice != null) {
+    const totalTpDistance = isLong ? tpPrice - entryPrice : entryPrice - tpPrice;
+    const distanceToTp = isLong ? tpPrice - currentPrice : currentPrice - tpPrice;
+    if (totalTpDistance > 0 && distanceToTp / totalTpDistance <= 0.25) {
+      return { key: "objectifProche", message: `${base} Prix à ${(100 * distanceToTp / totalTpDistance).toFixed(0)}% de la distance de l'objectif ($${formatPrice(tpPrice)}) — envisage de sécuriser une partie des gains.` };
+    }
+  }
+
+  // 6. Le marché confirme toujours la direction de la position
+  if ((isLong && marketBullish) || (!isLong && marketBearish)) {
+    return { key: "renforcer", message: `${base} Signal toujours ${r.verdict} — tu peux envisager de renforcer la position.` };
+  }
+
+  // 7. Rien de particulier
+  return { key: "patienter", message: `${base} Signal neutre, rien de particulier à signaler pour l'instant — patiente.` };
 }
 
 function splitLabel(label) {
@@ -1972,7 +1955,7 @@ function TopMarkets({ watchlist, scanState, onSendToCalculator, onGoToHistorique
 
       {results.length > 0 && (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                    {results.map((r) => {
+          {results.map((r) => {
             const { name, ticker } = splitLabel(r.label);
 
             if (r.error) {
@@ -1994,80 +1977,70 @@ function TopMarkets({ watchlist, scanState, onSendToCalculator, onGoToHistorique
             const matchedTrade = openTrades.find(
               (t) => t.symbol === resultSymbol && t.assetType === resultAssetType
             );
+            // On utilise le prix live pour la détection stop/TP touché (plus fiable
+            // qu'un prix figé au moment du scan) ; le verdict technique (r.verdict)
+            // reste celui du scan, il n'a pas besoin d'être temps réel.
             const guidance = matchedTrade
               ? computePositionGuidance(matchedTrade, { ...r, price: displayPrice })
               : null;
 
-            // Source de vérité pour l'action affichée : sentinel.status (VALID/WAIT/AVOID)
-            // quand disponible. Fallback sur l'ancien verdict bull/bear uniquement pour les
-            // actifs sans historique suffisant (or/argent, actif tout juste ajouté), où
-            // sentinel est null par construction.
-            const status = r.sentinel?.status;
-            const action = guidance
-              ? POSITION_BADGE[guidance.key]
-              : status === "VALID"
-              ? { label: "GO", color: POS }
-              : status === "WAIT"
-              ? { label: "WAIT", color: MUTED }
-              : status === "AVOID"
-              ? { label: "AVOID", color: NEG }
-              : ACTION_MAP[r.verdict] || ACTION_MAP["mitigé"];
+            const action = guidance ? POSITION_BADGE[guidance.key] : ACTION_MAP[r.verdict] || ACTION_MAP["mitigé"];
 
             const isBearishLevels = r.levelsDirection === "baissier";
-            const buyPrice = r.price;
+            const buyPrice = r.price; // prix du scan, cohérent avec stop/TP/R:R (le prix live reste affiché en haut de carte)
             const sellPrice = r.takeProfit;
             const stopPrice = isBearishLevels ? r.atrStopShort : r.atrStop;
-            // AVOID (score Sentinel insuffisant) : on n'affiche plus les niveaux comme si
-            // c'était un setup exploitable, même si le calcul brut existe en coulisses.
-            const hasLevels = !guidance && status !== "AVOID" && sellPrice != null && stopPrice != null;
+            const hasLevels = !guidance && sellPrice != null && stopPrice != null;
             const hasChange = r.change24h != null;
-            const hasRR = !guidance && status !== "AVOID" && r.riskReward != null && Number.isFinite(r.riskReward);
+            const hasRR = !guidance && r.riskReward != null && Number.isFinite(r.riskReward);
 
+            // Pour une position déjà ouverte gérée depuis l'Historique
+            // (stop/objectif proche ou atteint, ou retournement), le clic
+            // amène vers l'onglet Historique plutôt que de proposer un
+            // nouveau trade. "Renforcer" pré-remplit le Calculateur en
+            // combinant l'historique (montant investi, levier, sens, actif
+            // — tirés du trade ouvert lui-même) et l'analyse en cours de
+            // l'appli (prix d'entrée, stop, take-profit recalculés à
+            // l'instant T par le moteur). L'absence de position ouverte
+            // envoie vers le Calculateur comme pour un nouveau trade.
             const handleClick = () => {
-  // Une position ouverte existe déjà sur cet actif : "renforcer" ouvre le
-  // Calculateur pré-rempli pour un ajout, "vendre" et "attendre" renvoient
-  // vers l'Historique pour gérer la position réelle plutôt que d'ouvrir un
-  // nouveau trade indépendant.
-  if (guidance) {
-    if (guidance.key === "renforcer") {
-      const isLong = matchedTrade.direction !== "short";
-      onSendToCalculator({
-        entry: r.price,
-        stop: isLong ? r.atrStop : r.atrStopShort,
-        takeProfit: r.takeProfit,
-        support: r.support,
-        resistance: r.resistance,
-        assetType: matchedTrade.assetType,
-        direction: matchedTrade.direction,
-        symbol: matchedTrade.symbol,
-        rawQuery: r.rawQuery || r.query,
-        verdict: r.verdict,
-        invested: matchedTrade.invested,
-        leverage: matchedTrade.leverage,
-      });
-      return;
-    }
-    onGoToHistorique();
-    return;
-  }
+              if (guidance && guidance.key !== "renforcer" && guidance.key !== "patienter") {
+                onGoToHistorique();
+                return;
+              }
 
-  // Pas de position existante : setup jugé à éviter par le moteur → pas
-  // d'ouverture de nouveau trade depuis cette carte.
-  if (status === "AVOID") return;
-
-  onSendToCalculator({
-    entry: r.price,
-    stop: stopPrice,
-    takeProfit: sellPrice,
-    support: r.support,
-    resistance: r.resistance,
-    assetType: resultAssetType,
-    direction: isBearishLevels ? "short" : "long",
-    symbol: resultSymbol,
-    rawQuery: r.rawQuery || r.query,
-    verdict: r.verdict,
-  });
-};
+              if (guidance && guidance.key === "renforcer") {
+              const isLong = matchedTrade.direction !== "short";
+              onSendToCalculator({
+                entry: r.price, // prix du scan, cohérent avec le stop/TP ci-dessous (pas le prix live)
+                stop: isLong ? r.atrStop : r.atrStopShort,
+                takeProfit: r.takeProfit,
+                support: r.support,
+                resistance: r.resistance,
+                assetType: matchedTrade.assetType,
+                direction: matchedTrade.direction,
+                symbol: matchedTrade.symbol,
+                rawQuery: r.rawQuery || r.query,
+                verdict: r.verdict,
+                invested: matchedTrade.invested,
+                leverage: matchedTrade.leverage,
+              });
+              return;
+            }
+      
+            onSendToCalculator({
+              entry: r.price, // prix du scan, cohérent avec le stop/TP ci-dessous (pas le prix live)
+              stop: stopPrice,
+              takeProfit: sellPrice,
+              support: r.support,
+              resistance: r.resistance,
+              assetType: resultAssetType,
+              direction: isBearishLevels ? "short" : "long",
+              symbol: resultSymbol,
+              rawQuery: r.rawQuery || r.query,
+              verdict: r.verdict,
+            });
+          };
 
             return (
               <button
@@ -2078,8 +2051,7 @@ function TopMarkets({ watchlist, scanState, onSendToCalculator, onGoToHistorique
                   border: `1px solid ${LINE}`,
                   borderRadius: 10,
                   padding: "12px 14px",
-                  cursor: status === "AVOID" && !guidance ? "default" : "pointer",
-                  opacity: status === "AVOID" && !guidance ? 0.7 : 1,
+                  cursor: "pointer",
                   color: TEXT,
                   textAlign: "left",
                   width: "100%",
@@ -2171,7 +2143,6 @@ function TopMarkets({ watchlist, scanState, onSendToCalculator, onGoToHistorique
               </button>
             );
           })}
-
         </div>
       )}
     </div>
