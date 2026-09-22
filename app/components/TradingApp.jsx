@@ -1924,6 +1924,50 @@ function ScanFreshnessBadge({ timestamp, now }) {
   );
 }
 
+// ---------- Journal des signaux (pour mesurer la précision réelle du moteur) ----------
+// Contrairement à l'historique de trades (qui ne contient que ce que tu as
+// pris), ce journal enregistre TOUS les signaux d'un scan complété — GO
+// tradés ou non, WAIT, AVOID — avec le prix au moment du scan. Sans ça,
+// impossible de savoir si le moteur évite bien les mauvaises situations, on
+// ne mesure que la moitié de sa performance.
+const SIGNAL_LOG_KEY = "trading-app:signal-log";
+const SIGNAL_LOG_MAX_ENTRIES = 2000; // évite une croissance illimitée du localStorage
+
+function loadSignalLog() {
+  if (typeof window === "undefined") return [];
+  try {
+    return JSON.parse(window.localStorage.getItem(SIGNAL_LOG_KEY) || "[]");
+  } catch {
+    return [];
+  }
+}
+
+function appendSignalSnapshot(results, watchlistId) {
+  if (typeof window === "undefined") return;
+  try {
+    const log = loadSignalLog();
+    const now = Date.now();
+    const entries = results
+      .filter((r) => !r.error)
+      .map((r) => ({
+        ts: now,
+        watchlistId,
+        symbol: r.symbol || r.query?.toUpperCase(),
+        type: r.type,
+        price: r.price,
+        verdict: r.verdict,
+        sentinelStatus: r.sentinel?.status ?? null,
+        sentinelScore: r.sentinel?.score ?? null,
+        takeProfit: r.takeProfit ?? null,
+        stop: r.levelsDirection === "baissier" ? r.atrStopShort : r.atrStop,
+      }));
+    const merged = [...log, ...entries].slice(-SIGNAL_LOG_MAX_ENTRIES);
+    window.localStorage.setItem(SIGNAL_LOG_KEY, JSON.stringify(merged));
+  } catch {
+    // localStorage plein/indisponible : le journal n'est pas critique, on continue sans lui
+  }
+}
+
 function TopMarkets({ watchlist, scanState, onSendToCalculator, onGoToHistorique }) {
   const [openTrades, setOpenTrades] = useState([]);
   const [now, setNow] = useState(Date.now());
@@ -1937,9 +1981,19 @@ function TopMarkets({ watchlist, scanState, onSendToCalculator, onGoToHistorique
     return () => clearInterval(id);
   }, []);
 
-  useEffect(() => {
+    useEffect(() => {
     setOpenTrades(getOpenTrades(loadHistory()));
   }, [results]);
+
+  // Journalise un instantané des signaux dès que ce scan est complet — une
+  // seule fois par scan (pas à chaque tick de "results" pendant le
+  // chargement progressif), pour ne pas polluer le journal de doublons.
+  const loggedForScanTimeRef = useRef(null);
+  useEffect(() => {
+    if (!scanTime || loggedForScanTimeRef.current === scanTime) return;
+    loggedForScanTimeRef.current = scanTime;
+    appendSignalSnapshot(results, watchlist === CRYPTO_WATCHLIST ? "crypto" : watchlist === OTHER_WATCHLIST ? "fx" : "actions");
+  }, [scanTime, results, watchlist]);
 
   return (
     <div>
@@ -2023,20 +2077,20 @@ function TopMarkets({ watchlist, scanState, onSendToCalculator, onGoToHistorique
               if (guidance) {
                 if (guidance.key === "renforcer") {
                   const isLong = matchedTrade.direction !== "short";
-                  onSendToCalculator({
-                    entry: r.price,
-                    stop: isLong ? r.atrStop : r.atrStopShort,
-                    takeProfit: r.takeProfit,
-                    support: r.support,
-                    resistance: r.resistance,
-                    assetType: matchedTrade.assetType,
-                    direction: matchedTrade.direction,
-                    symbol: matchedTrade.symbol,
-                    rawQuery: r.rawQuery || r.query,
-                    verdict: r.verdict,
-                    invested: matchedTrade.invested,
-                    leverage: matchedTrade.leverage,
-                  });
+                                onSendToCalculator({
+                entry: r.price,
+                stop: stopPrice,
+                takeProfit: sellPrice,
+                support: r.support,
+                resistance: r.resistance,
+                assetType: resultAssetType,
+                direction: isBearishLevels ? "short" : "long",
+                symbol: resultSymbol,
+                rawQuery: r.rawQuery || r.query,
+                verdict: r.verdict,
+                sentinelScore: r.sentinel?.score ?? null,
+                sentinelStatus: r.sentinel?.status ?? null,
+              });
                   return;
                 }
                 onGoToHistorique();
@@ -2383,8 +2437,12 @@ function Calculateur({ prefill }) {
     <CalcField label={label} value={value} onChange={onChange} placeholder={placeholder} readOnly={locked} />
   );
 
-  // Construit l'objet trade à partir des valeurs actuelles du calcul, pour
+     // Construit l'objet trade à partir des valeurs actuelles du calcul, pour
   // le bouton "Marquer comme pris" (onglet Historique).
+  // sentinelScore/sentinelStatus sont conservés tels qu'au moment de
+  // l'entrée (pas recalculés plus tard) : c'est ce qui permet, après coup,
+  // de vérifier si "VALID" a vraiment mieux performé que "WAIT"/"AVOID" —
+  // sans eux, impossible de mesurer la précision réelle du moteur.
   const buildCandidateTrade = () => {
     const direction = prefill?.direction || (s < e ? "long" : "short");
     return {
@@ -2402,6 +2460,8 @@ function Calculateur({ prefill }) {
       potentialGain: gainAmount,
       riskPct: lossPctOfInvested,
       verdict: prefill?.verdict || null,
+      sentinelScore: prefill?.sentinelScore ?? null,
+      sentinelStatus: prefill?.sentinelStatus ?? null,
     };
   };
 
