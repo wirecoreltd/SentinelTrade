@@ -1403,6 +1403,9 @@ function Dossier({ setTab, setPrefillCalc }) {
                 symbol: dossier.symbol,
                 rawQuery: dossier.rawQuery,
                 verdict: dossier.verdict,
+                riskReward: dossier.riskReward ?? null,
+                sentinelScore: dossier.sentinel?.score ?? null,
+                sentinelStatus: dossier.sentinel?.status ?? null,
               });
               setTab("calc");
             }}
@@ -1769,6 +1772,7 @@ function LongTermInvestissement({ scanState, onSendToCalculator }) {
                   horizonRiskPct: h.riskPct,
                   horizonRewardPct: h.rewardPct,
                   horizonRiskReward: h.riskReward,
+                  riskReward: h.riskReward,
                 })}
                 style={{ width: "100%", marginTop: 10, padding: "10px 12px", borderRadius: 8, border: `1px solid ${ACCENT}`, background: "rgba(79,140,255,0.10)", color: ACCENT, fontSize: 12, fontWeight: 800, cursor: "pointer" }}
               >
@@ -1823,7 +1827,7 @@ function formatTradeDateShort(iso) {
 
 // Recommandation à 3 issues seulement : VENDRE / RENFORCER / ATTENDRE.
 // Utilise le Sentinel Score (bias + status) quand il est disponible — c'est
-// le même filtre de qualité que celui qui décide GO/WAIT/AVOID pour un
+// le même filtre de qualité qui décide GO/WAIT/AVOID pour un
 // nouveau trade — et retombe sur le simple verdict bull/bear pour les
 // actifs sans historique suffisant (or, argent : sentinel est null).
 // S'applique à TOUTE position ouverte, qu'elle ait déjà un stop/TP défini
@@ -1968,6 +1972,160 @@ function appendSignalSnapshot(results, watchlistId) {
   }
 }
 
+// Détermine ce qui s'est passé pour un signal journalisé, en comparant le
+// prix actuel au prix et aux niveaux enregistrés au moment du scan.
+// Ne juge que les verdicts haussier/baissier (un "mitigé" n'a pas de
+// direction prédite, donc pas de vrai/faux à mesurer).
+function evaluateSignalEntry(entry, currentPrice) {
+  if (currentPrice == null || !Number.isFinite(currentPrice)) return { outcome: "prix indisponible" };
+  if (entry.verdict !== "haussier" && entry.verdict !== "baissier") return { outcome: "signal neutre (non mesuré)" };
+
+  const isBull = entry.verdict === "haussier";
+  const { stop, takeProfit, price: entryPrice } = entry;
+
+  if (stop != null && (isBull ? currentPrice <= stop : currentPrice >= stop)) {
+    return { outcome: "stop touché", correct: false, final: true };
+  }
+  if (takeProfit != null && (isBull ? currentPrice >= takeProfit : currentPrice <= takeProfit)) {
+    return { outcome: "take-profit touché", correct: true, final: true };
+  }
+
+  const movedFavorably = isBull ? currentPrice > entryPrice : currentPrice < entryPrice;
+  const pctMove = entryPrice ? ((currentPrice - entryPrice) / entryPrice) * 100 : null;
+  return {
+    outcome: movedFavorably ? "en cours (favorable)" : "en cours (défavorable)",
+    correct: movedFavorably,
+    final: false,
+    pctMove,
+  };
+}
+
+function SignalPrecisionTab() {
+  const [entries, setEntries] = useState(() => loadSignalLog());
+  const [evaluations, setEvaluations] = useState({}); // key: `${type}:${symbol}` -> { price, ts }
+  const [checking, setChecking] = useState(false);
+  const [progress, setProgress] = useState({ done: 0, total: 0 });
+
+  const refreshLog = () => setEntries(loadSignalLog());
+
+  // Un seul appel prix par symbole unique (pas par entrée du journal) pour
+  // ne pas exploser les quotas Twelve Data/Alpha Vantage — un symbole peut
+  // apparaître des dizaines de fois dans le journal au fil des scans.
+  const uniqueSymbols = [...new Map(entries.map((e) => [`${e.type}:${e.symbol}`, e])).values()];
+
+  const checkNow = async () => {
+    setChecking(true);
+    setProgress({ done: 0, total: uniqueSymbols.length });
+    const results = {};
+    for (const e of uniqueSymbols) {
+      const key = `${e.type}:${e.symbol}`;
+      try {
+        let price = null;
+        if (e.type === "crypto") {
+          const p = await fetchCoinGeckoPrice(e.symbol.toLowerCase());
+          price = p.price;
+        } else if (e.type === "fx" && isMetal(e.symbol)) {
+          const p = await fetchMetalPrice(e.symbol);
+          price = p.price;
+        } else if (e.type === "fx") {
+          const p = await fetchFxQuote(e.symbol);
+          price = p.price;
+          await new Promise((r) => setTimeout(r, 1000)); // respecte la limite Twelve Data
+        } else {
+          const p = await fetchAlphaQuote(e.symbol);
+          price = p.price;
+          await new Promise((r) => setTimeout(r, 200));
+        }
+        results[key] = price;
+      } catch {
+        results[key] = null;
+      }
+      setProgress((p) => ({ ...p, done: p.done + 1 }));
+    }
+    setEvaluations(results);
+    setChecking(false);
+  };
+
+  // Agrège par statut Sentinel (VALID/WAIT/AVOID, ou "—" si non disponible —
+  // typiquement or/argent, sans historique technique) le nombre de gagnants,
+  // perdants et en-cours, sur les seules entrées déjà évaluées.
+  const stats = {};
+  entries.forEach((e) => {
+    const key = `${e.type}:${e.symbol}`;
+    const price = evaluations[key];
+    if (price == null) return;
+    const result = evaluateSignalEntry(e, price);
+    const statusKey = e.sentinelStatus || "—";
+    if (!stats[statusKey]) stats[statusKey] = { total: 0, correct: 0, final: 0, finalCorrect: 0 };
+    if (result.correct != null) {
+      stats[statusKey].total += 1;
+      if (result.correct) stats[statusKey].correct += 1;
+      if (result.final) {
+        stats[statusKey].final += 1;
+        if (result.correct) stats[statusKey].finalCorrect += 1;
+      }
+    }
+  });
+
+  return (
+    <div>
+      <div style={{ fontSize: 13, color: MUTED, marginBottom: 12, lineHeight: 1.5 }}>
+        Journal de tous les signaux vus lors des scans (tradés ou non) — {entries.length} entrée(s) enregistrée(s),
+        {" "}{uniqueSymbols.length} actif(s) unique(s). Compare le prix actuel à ce qui était prédit, pour mesurer
+        la vraie précision du moteur par statut, pas seulement sur les trades que tu as pris.
+      </div>
+
+      <button
+        onClick={checkNow}
+        disabled={checking || uniqueSymbols.length === 0}
+        style={{
+          width: "100%", padding: "10px 0", borderRadius: 8, border: `1px solid ${ACCENT}`,
+          background: "rgba(79,140,255,0.12)", color: ACCENT, fontSize: 13, fontWeight: 700,
+          cursor: checking ? "not-allowed" : "pointer", marginBottom: 14,
+        }}
+      >
+        {checking ? `Vérification ${progress.done}/${progress.total}…` : "Vérifier les prix actuels"}
+      </button>
+
+      {Object.keys(stats).length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 }}>
+          {Object.entries(stats).map(([status, s]) => (
+            <div key={status} style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: 12 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+                <span style={{ fontSize: 13, fontWeight: 700 }}>{status}</span>
+                <span style={{ fontSize: 12, color: MUTED }}>{s.total} signal(aux) directionnel(s)</span>
+              </div>
+              <div style={{ fontSize: 12, color: MUTED }}>
+                En avance favorable actuellement : <strong style={{ color: TEXT }}>{s.total ? ((s.correct / s.total) * 100).toFixed(0) : 0}%</strong>
+                {s.final > 0 && (
+                  <> · Résolus (stop ou TP touché) : <strong style={{ color: TEXT }}>{s.final}</strong>, dont <strong style={{ color: POS }}>{s.finalCorrect} gagnants</strong></>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ fontSize: 11, color: MUTED, marginBottom: 10 }}>Journal brut ({entries.length} entrées)</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 400, overflowY: "auto" }}>
+        {entries.slice().reverse().slice(0, 100).map((e, i) => {
+          const key = `${e.type}:${e.symbol}`;
+          const price = evaluations[key];
+          const result = price != null ? evaluateSignalEntry(e, price) : null;
+          return (
+            <div key={i} style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 8, padding: "8px 10px", fontSize: 11, display: "flex", justifyContent: "space-between", gap: 8 }}>
+              <span style={{ color: TEXT }}>{e.symbol} · {e.verdict}{e.sentinelStatus ? ` (${e.sentinelStatus})` : ""}</span>
+              <span style={{ color: result?.correct === true ? POS : result?.correct === false ? NEG : MUTED }}>
+                {result ? result.outcome : "à vérifier"}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function TopMarkets({ watchlist, scanState, onSendToCalculator, onGoToHistorique }) {
   const [openTrades, setOpenTrades] = useState([]);
   const [now, setNow] = useState(Date.now());
@@ -2074,23 +2232,26 @@ function TopMarkets({ watchlist, scanState, onSendToCalculator, onGoToHistorique
               // Calculateur pré-rempli pour un ajout, "vendre" et "attendre" renvoient
               // vers l'Historique pour gérer la position réelle plutôt que d'ouvrir un
               // nouveau trade indépendant.
-              if (guidance) {
+                            if (guidance) {
                 if (guidance.key === "renforcer") {
                   const isLong = matchedTrade.direction !== "short";
-                                onSendToCalculator({
-                entry: r.price,
-                stop: stopPrice,
-                takeProfit: sellPrice,
-                support: r.support,
-                resistance: r.resistance,
-                assetType: resultAssetType,
-                direction: isBearishLevels ? "short" : "long",
-                symbol: resultSymbol,
-                rawQuery: r.rawQuery || r.query,
-                verdict: r.verdict,
-                sentinelScore: r.sentinel?.score ?? null,
-                sentinelStatus: r.sentinel?.status ?? null,
-              });
+                  onSendToCalculator({
+                    entry: r.price,
+                    stop: isLong ? r.atrStop : r.atrStopShort,
+                    takeProfit: r.takeProfit,
+                    support: r.support,
+                    resistance: r.resistance,
+                    assetType: matchedTrade.assetType,
+                    direction: matchedTrade.direction,
+                    symbol: matchedTrade.symbol,
+                    rawQuery: r.rawQuery || r.query,
+                    verdict: r.verdict,
+                    invested: matchedTrade.invested,
+                    leverage: matchedTrade.leverage,
+                    riskReward: r.riskReward ?? null,
+                    sentinelScore: r.sentinel?.score ?? null,
+                    sentinelStatus: r.sentinel?.status ?? null,
+                  });
                   return;
                 }
                 onGoToHistorique();
@@ -2112,6 +2273,9 @@ function TopMarkets({ watchlist, scanState, onSendToCalculator, onGoToHistorique
                 symbol: resultSymbol,
                 rawQuery: r.rawQuery || r.query,
                 verdict: r.verdict,
+                riskReward: r.riskReward ?? null,
+                sentinelScore: r.sentinel?.score ?? null,
+                sentinelStatus: r.sentinel?.status ?? null,
               });
             };
 
@@ -2230,6 +2394,13 @@ const LEVERAGE_PRESETS = {
   matieres: { label: "Matières premières / Or", leverage: 20 },
   spot: { label: "Spot (Binance, sans levier)", leverage: 1 },
 };
+
+// Seuil de tolérance pour l'alerte "R:R réel vs R:R affiché" au moment de
+// logger un trade : au-delà de cet écart relatif, on prévient que le
+// R:R du trade tel qu'il va être enregistré s'est éloigné de ce que le
+// moteur d'analyse annonçait au départ (typiquement parce qu'un niveau a
+// été modifié à la main entre l'analyse et le calculateur).
+const RR_MISMATCH_THRESHOLD = 0.25; // 25% d'écart relatif
 
 function CalcField({ label, value, onChange, placeholder, readOnly = false }) {
   return (
@@ -2382,7 +2553,26 @@ function Calculateur({ prefill }) {
   const e = parseFloat(entry);
   const s = parseFloat(stop);
   const tp = parseFloat(takeProfit);
-  const valid = inv > 0 && lev > 0 && e > 0 && s > 0 && e !== s;
+
+  // Direction connue avec certitude uniquement quand elle vient du moteur
+  // (prefill.direction, envoyé par Dossier / Top 15 / Long terme). En mode
+  // manuel sans prefill, il n'existe pas de sélecteur Long/Short explicite :
+  // la direction est alors simplement déduite de la position du stop, donc
+  // il n'y a rien à valider dans ce cas (elle ne peut pas être "fausse").
+  const knownDirection = prefill?.direction || null;
+
+  const rawValid = inv > 0 && lev > 0 && e > 0 && s > 0 && e !== s;
+
+  // Le stop doit être du bon côté du prix d'entrée : en dessous pour un
+  // Long, au-dessus pour un Short. C'est exactement le genre d'erreur de
+  // saisie qui rend un calcul de risque/gain totalement faux sans que ça
+  // saute aux yeux (ex: un stop de Short resté positionné comme un Long).
+  const stopSideError =
+    rawValid && knownDirection
+      ? (knownDirection === "short" ? s <= e : s >= e)
+      : false;
+
+  const valid = rawValid && !stopSideError;
   const positionValue = valid ? inv * lev : null;
   const quantity = valid ? positionValue / e : null;
   const distance = valid ? Math.abs(e - s) : null;
@@ -2392,6 +2582,14 @@ function Calculateur({ prefill }) {
   const gainAmount = valid && tp > 0 ? quantity * Math.abs(tp - e) : null;
   const gainDistance = valid && tp > 0 ? Math.abs(tp - e) : null;
   const gainDistancePct = valid && tp > 0 ? (gainDistance / e) * 100 : null;
+
+  // R:R "réel", calculé sur les valeurs actuellement dans les champs du
+  // calculateur (qui peuvent avoir été modifiées à la main depuis l'envoi
+  // depuis le Dossier / Top 15 / Long terme). Comparé au R:R "affiché" au
+  // moment de l'analyse (prefill.riskReward / prefill.horizonRiskReward)
+  // au moment de logger le trade, pour repérer un niveau modifié par erreur.
+  const currentRiskReward = valid && gainDistance != null && distance > 0 ? gainDistance / distance : null;
+  const displayedRiskReward = prefill?.riskReward ?? prefill?.horizonRiskReward ?? null;
 
   // Mise suggérée pour risquer exactement riskPct% du capital total sur ce
   // trade précis, compte tenu de l'entrée/stop/levier actuels :
@@ -2468,7 +2666,26 @@ function Calculateur({ prefill }) {
   const handleTradePris = () => {
     if (!valid) return;
     const candidate = buildCandidateTrade();
-    const warnings = checkGuidance(candidate);
+    const warnings = [...checkGuidance(candidate)];
+
+    // Filet de sécurité supplémentaire : si le R:R réel du trade tel qu'il
+    // va être enregistré s'est éloigné de ce que le moteur affichait au
+    // moment de l'analyse, on prévient avant de logger — ça n'empêche pas
+    // de continuer (contrairement au stop du mauvais côté, qui est une
+    // vraie erreur), mais ça force à confirmer en connaissance de cause.
+    if (
+      displayedRiskReward != null &&
+      displayedRiskReward > 0 &&
+      currentRiskReward != null
+    ) {
+      const relativeDiff = Math.abs(currentRiskReward - displayedRiskReward) / displayedRiskReward;
+      if (relativeDiff > RR_MISMATCH_THRESHOLD) {
+        warnings.push(
+          `Le R:R réel de ce trade (${currentRiskReward.toFixed(2)}:1) diffère du R:R affiché au moment de l'analyse (${displayedRiskReward.toFixed(2)}:1) — vérifie qu'aucun niveau (entrée, stop ou take-profit) n'a été modifié par erreur.`
+        );
+      }
+    }
+
     if (warnings.length > 0) {
       setGuidanceWarnings(warnings);
       setPendingLog(candidate);
@@ -2584,6 +2801,14 @@ function Calculateur({ prefill }) {
       {field("Stop-loss", stop, setStop, "ex: 4300.00")}
       {field("Take-profit (optionnel)", takeProfit, setTakeProfit, "ex: 4420.00")}
 
+      {stopSideError && (
+        <div style={{ background: "rgba(255,103,103,0.1)", border: `1px solid ${NEG}`, borderRadius: 8, padding: "10px 12px", marginTop: -4, marginBottom: 12, fontSize: 12, color: NEG, lineHeight: 1.5 }}>
+          ⚠️ Le stop-loss est du mauvais côté du prix d'entrée pour un {knownDirection === "short" ? "Short" : "Long"} —
+          il doit être {knownDirection === "short" ? "au-dessus" : "en dessous"} du prix d'entrée. Corrige le stop ou le prix
+          d'entrée avant de continuer : tant que c'est le cas, aucun calcul ni enregistrement n'est possible.
+        </div>
+      )}
+
       {valid ? (
         <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 16, marginTop: 8 }}>
           <div style={{ marginBottom: 12, paddingBottom: 12, borderBottom: `1px solid ${LINE}` }}>
@@ -2603,7 +2828,13 @@ function Calculateur({ prefill }) {
           {lossPctOfInvested > 100 && <div style={{ fontSize: 11, color: NEG, marginTop: 10 }}>⚠️ La perte potentielle dépasse ta mise de départ — avec ce levier, ta position peut être liquidée avant que le stop ne soit atteint. Réduis le levier ou resserre le stop.</div>}
         </div>
       ) : (
-        <div style={{ fontSize: 12, color: MUTED, marginTop: 8 }}>{autoLocked && prefill?.symbol ? "Le moteur n'a pas fourni tous les niveaux nécessaires pour calculer automatiquement ce trade. Passe en mode Manuel pour définir les niveaux." : "Remplis montant, levier, entrée et stop-loss pour voir le calcul."}</div>
+        <div style={{ fontSize: 12, color: MUTED, marginTop: 8 }}>
+          {stopSideError
+            ? null
+            : autoLocked && prefill?.symbol
+            ? "Le moteur n'a pas fourni tous les niveaux nécessaires pour calculer automatiquement ce trade. Passe en mode Manuel pour définir les niveaux."
+            : "Remplis montant, levier, entrée et stop-loss pour voir le calcul."}
+        </div>
       )}
 
       {valid && (
@@ -2949,10 +3180,11 @@ export default function TradingApp() {
     { id: "longterm", label: "📈 Long terme", icon: CalendarRange },
   ];
 
-  const bottomTabs = [
+    const bottomTabs = [
     { id: "dossier", label: "Dossier", icon: FileText },
     { id: "calc", label: "Calculateur", icon: Calculator },
     { id: "historique", label: "Historique", icon: HistoryIcon },
+    { id: "precision", label: "Précision", icon: TrendingUp },
   ];
 
   const tabButtonStyle = (id) => ({
@@ -3040,6 +3272,7 @@ export default function TradingApp() {
         {tab === "dossier" && <Dossier setTab={setTab} setPrefillCalc={setPrefillCalc} />}
         {tab === "calc" && <Calculateur prefill={prefillCalc} />}
         {tab === "historique" && <HistoryTab />}
+        {tab === "precision" && <SignalPrecisionTab />}
       </div>
     </div>
   );
