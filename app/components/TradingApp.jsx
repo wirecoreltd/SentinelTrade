@@ -2,6 +2,11 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { calculateSentinelScore } from "../lib/sentinelEngine";
+import { detectLiquidity } from "../lib/liquidityEngine";
+import { detectFVG } from "../lib/fvgEngine";
+import { detectDisplacement } from "../lib/displacementEngine";
+import { detectOrderBlocks } from "../lib/orderBlockEngine";
+import { computeConfluence } from "../lib/confluenceEngine";
 import {
   FileText,
   Calculator,
@@ -890,26 +895,33 @@ async function runMarketAnalysis(type, query) {
     verdict,
   };
 
+  const liquidity = detectLiquidity(history);
+  const fvg = detectFVG(history);
+  const displacement = detectDisplacement(history, atr);
+  const orderBlock = detectOrderBlocks(history, { atr });
+  const confluence = computeConfluence({ liquidity, fvg, displacement, orderBlock });
+
   const sentinel = calculateSentinelScore(sentinelInput);
 
   return {
-    symbol: query.toUpperCase(),
-    rawQuery: query,
-    price: currentPrice,
-    change24h,
-    support,
-    resistance,
-    verdict,
-    levelsDirection,
-    score: bull - bear,
-    reasoning,
-    news,
-    atrStop,
-    atrStopShort,
-    takeProfit,
-    riskReward,
-    sentinel,
-  };
+  symbol: query.toUpperCase(),
+  rawQuery: query,
+  price: currentPrice,
+  change24h,
+  support,
+  resistance,
+  verdict,
+  levelsDirection,
+  score: bull - bear,
+  reasoning,
+  news,
+  atrStop,
+  atrStopShort,
+  takeProfit,
+  riskReward,
+  sentinel,
+  smc: { liquidity, fvg, displacement, orderBlock, confluence }, // NOUVEAU — informatif
+};
 }
 
 const RANGE_OPTIONS = [
@@ -1372,6 +1384,20 @@ function Dossier({ setTab, setPrefillCalc }) {
           )}
 
           <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 14 }}>
+            {dossier.smc?.confluence && (
+                <div style={{ marginBottom: 14, borderBottom: `1px solid ${LINE}`, paddingBottom: 14 }}>
+                  <div style={{ fontSize: 12, color: MUTED, textTransform: "uppercase", marginBottom: 6 }}>
+                    SMC (indicatif — pas encore intégré au score)
+                  </div>
+                  <div style={{ fontSize: 12, color: TEXT, marginBottom: 4 }}>
+                    Biais : {dossier.smc.confluence.bias} ({dossier.smc.confluence.activeCount}/4 moteurs actifs)
+                  </div>
+                  {dossier.smc.confluence.reasons.map((r, i) => (
+                    <div key={i} style={{ fontSize: 11, color: MUTED }}>• {r}</div>
+                  ))}
+                </div>
+              )}
+            
             {dossier.reasoning.map((line, i) => (
               <div key={i} style={{ fontSize: 13, color: MUTED, display: "flex", gap: 6 }}>
                 <span style={{ color: ACCENT }}>•</span> {line}
@@ -1964,6 +1990,8 @@ function appendSignalSnapshot(results, watchlistId) {
         sentinelScore: r.sentinel?.score ?? null,
         takeProfit: r.takeProfit ?? null,
         stop: r.levelsDirection === "baissier" ? r.atrStopShort : r.atrStop,
+        smcBias: r.smc?.confluence?.bias ?? null,
+        smcActiveCount: r.smc?.confluence?.activeCount ?? null,
       }));
     const merged = [...log, ...entries].slice(-SIGNAL_LOG_MAX_ENTRIES);
     window.localStorage.setItem(SIGNAL_LOG_KEY, JSON.stringify(merged));
@@ -2150,8 +2178,8 @@ function TopMarkets({ watchlist, scanState, onSendToCalculator, onGoToHistorique
   useEffect(() => {
     if (!scanTime || loggedForScanTimeRef.current === scanTime) return;
     loggedForScanTimeRef.current = scanTime;
-    appendSignalSnapshot(results, watchlist === CRYPTO_WATCHLIST ? "crypto" : watchlist === OTHER_WATCHLIST ? "fx" : "actions");
-  }, [scanTime, results, watchlist]);
+    appendSignalSnapshot(results, watchlist === CRYPTO_WATCHLIST ? "crypto" : watchlist === OTHER_WATCHLIST ? "fx" : "actions");   
+         }, [scanTime, results, watchlist]);
 
   return (
     <div>
