@@ -1,5 +1,5 @@
 // ============================================================
-// SENTINEL ENGINE V2
+// SENTINEL ENGINE V2.1
 // Trade Quality Engine
 //
 // IMPORTANT:
@@ -15,6 +15,29 @@
 // preuves indépendantes. L'ADX (force de tendance) et le BOS/CHOCH
 // (changement de structure) restent des familles séparées car ils
 // apportent une information réellement distincte.
+//
+// V2.1 : trois familles retombaient quasi systématiquement à leur
+// plancher dans des conditions de marché tout à fait normales
+// (pas d'événement structurel du jour, ADX modéré, R:R correct
+// mais pas excellent), ce qui empêchait mécaniquement d'atteindre
+// VALID même sur de bons setups. Ce n'est pas la logique de ces
+// familles qui était fausse, juste leur calibrage :
+//   - structureChange partait de 0 et ne récompensait que les jours
+//     où un BOS/CHOCH se produit — "rien ne s'est passé aujourd'hui"
+//     n'est pourtant pas un défaut du setup, c'est l'état normal du
+//     marché la plupart du temps.
+//   - trendStrength punissait très fort (2/10) tout ADX < 20, sans
+//     palier intermédiaire, alors qu'un marché en range mou (ADX
+//     15-20) n'est pas forcément un mauvais setup si le reste
+//     confirme.
+//   - risk tombait à 0 sous un R:R de 1, ce qui est cohérent, mais
+//     écrasait aussi tout ce qui se situait entre 1.0 et 1.5 dans
+//     une bande trop large (8/15) et ne laissait rien du tout à un
+//     setup légèrement sous 1.0 (souvent le résultat d'un stop un
+//     peu prudent, pas d'un setup sans intérêt).
+// Le seuil VALID est aussi légèrement abaissé (65 → 58) et la
+// tolérance aux warnings assouplie (4 → 6), pour refléter qu'un
+// "bon" setup, pas "parfait", doit pouvoir passer VALID.
 // ============================================================
 
 const clamp = (value, min = 0, max = 100) =>
@@ -113,6 +136,10 @@ function calculateDirectionScore(data) {
 
 // ------------------------------------------------------------
 // 2. TREND STRENGTH SCORE / 10 (ADX seul — force, pas direction)
+//
+// V2.1 : ajout d'un palier intermédiaire à 15 pour ne pas punir
+// aussi durement un marché en range mou (ADX 15-20) qu'un marché
+// franchement plat (ADX < 15) — les deux ne se valent pas.
 // ------------------------------------------------------------
 
 function calculateTrendStrengthScore(data) {
@@ -127,10 +154,13 @@ function calculateTrendStrengthScore(data) {
       score += 10;
       reasons.push(`Strong trend strength (ADX ${adx.toFixed(1)})`);
     } else if (adx >= 20) {
-      score += 6;
+      score += 7;
       reasons.push(`Moderate trend strength (ADX ${adx.toFixed(1)})`);
+    } else if (adx >= 15) {
+      score += 5;
+      warnings.push(`Mild trend strength (ADX ${adx.toFixed(1)})`);
     } else {
-      score += 2;
+      score += 3;
       warnings.push(`Weak trend strength (ADX ${adx.toFixed(1)})`);
     }
   }
@@ -145,10 +175,16 @@ function calculateTrendStrengthScore(data) {
 
 // ------------------------------------------------------------
 // 3. STRUCTURE CHANGE SCORE / 10 (BOS / CHOCH)
+//
+// V2.1 : part d'un plancher neutre de 4/10 au lieu de 0. L'absence
+// de BOS/CHOCH le jour de l'analyse est l'état normal du marché la
+// plupart du temps — ce n'est pas un défaut du setup en soi, donc
+// ça ne doit pas coûter la quasi-totalité des points de la famille.
+// La présence d'un BOS ou d'un CHOCH reste un vrai bonus.
 // ------------------------------------------------------------
 
 function calculateStructureChangeScore(data) {
-  let score = 0;
+  let score = 4;
   const reasons = [];
   const warnings = [];
 
@@ -158,12 +194,15 @@ function calculateStructureChangeScore(data) {
   }
 
   if (structure.bos) {
-    score += 5;
+    score += 4;
     reasons.push("Break of Structure detected");
   }
   if (structure.choch || structure.mss) {
-    score += 5;
+    score += 2;
     reasons.push("Structure change detected");
+  }
+  if (!structure.bos && !structure.choch && !structure.mss) {
+    warnings.push("No recent structural break or reversal");
   }
 
   return {
@@ -209,9 +248,7 @@ function calculateEntryScore(data) {
     reasons.push("Multiple entry conditions agree");
   }
   if (activeSetups === 0) {
-    // Avant : score forcé à 3/15 quel que soit le reste, ce qui rendait un
-    // VALID quasi impossible dès qu'aucun pattern d'entrée précis n'était
-    // détecté. Absence de setup ≠ absence de qualité — les autres familles
+    // Absence de setup ≠ absence de qualité — les autres familles
     // (direction, structure, R:R...) restent des preuves valables.
     score = Math.min(score, 6);
     warnings.push("No defined entry setup detected");
@@ -343,6 +380,12 @@ function calculateVolatilityScore(data) {
 
 // ------------------------------------------------------------
 // 8. RISK SCORE / 15
+//
+// V2.1 : ajout de paliers intermédiaires entre 1.0 et 2.0 (au lieu
+// d'un seul palier 1.0-1.5 à 8pts), et un plancher de 1pt sous un
+// R:R de 1 au lieu de 0 — un setup avec un R:R légèrement sous 1
+// (souvent dû à un stop un peu prudent) reste une information,
+// pas une disqualification totale de la famille.
 // ------------------------------------------------------------
 
 function calculateRiskScore(data) {
@@ -362,9 +405,10 @@ function calculateRiskScore(data) {
 
   if (ratio >= 3) { score += 15; reasons.push(`Excellent Risk/Reward 1:${ratio.toFixed(1)}`); }
   else if (ratio >= 2) { score += 12; reasons.push(`Good Risk/Reward 1:${ratio.toFixed(1)}`); }
-  else if (ratio >= 1.5) { score += 8; reasons.push(`Acceptable Risk/Reward 1:${ratio.toFixed(1)}`); }
+  else if (ratio >= 1.5) { score += 10; reasons.push(`Acceptable Risk/Reward 1:${ratio.toFixed(1)}`); }
+  else if (ratio >= 1.2) { score += 7; reasons.push(`Modest Risk/Reward 1:${ratio.toFixed(1)}`); }
   else if (ratio >= 1) { score += 4; warnings.push(`Low Risk/Reward 1:${ratio.toFixed(1)}`); }
-  else { score += 0; warnings.push(`Poor Risk/Reward 1:${ratio.toFixed(1)}`); }
+  else { score += 1; warnings.push(`Poor Risk/Reward 1:${ratio.toFixed(1)}`); }
 
   return { score: clamp(score, 0, 15), max: 15, reasons, warnings };
 }
@@ -430,9 +474,13 @@ export function calculateSentinelScore(data = {}) {
   // Seuils assouplis : le marché "parfait" (tous les facteurs alignés à la
   // fois) n'existe quasiment jamais. VALID doit signaler un bon setup, pas
   // un setup exceptionnel.
+  // V2.1 : seuil VALID abaissé (65 → 58) et tolérance aux warnings élargie
+  // (4 → 6), cohérent avec les paliers assouplis ci-dessus — sans ça, les
+  // familles rééquilibrées auraient continué à buter sur un seuil calibré
+  // pour l'ancien barème, plus dur.
   let status = "AVOID";
-  if (score >= 65 && warnings.length <= 4) status = "VALID";
-  else if (score >= 45) status = "WAIT";
+  if (score >= 58 && warnings.length <= 6) status = "VALID";
+  else if (score >= 40) status = "WAIT";
 
   return {
     score,
