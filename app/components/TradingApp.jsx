@@ -2314,7 +2314,7 @@ function TopMarkets({ watchlist, scanState, onSendToCalculator, onGoToHistorique
                   border: `1px solid ${LINE}`,
                   borderRadius: 10,
                   padding: "12px 14px",
-                  cursor: "pointer",=
+                  cursor: "pointer",
                   opacity: status === "AVOID" && !guidance ? 0.7 : 1, 
                   color: TEXT,
                   textAlign: "left",
