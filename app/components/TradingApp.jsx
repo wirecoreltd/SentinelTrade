@@ -2287,25 +2287,23 @@ function TopMarkets({ watchlist, scanState, onSendToCalculator, onGoToHistorique
               }
 
               // Pas de position existante : setup jugé à éviter par le moteur → pas
-              // d'ouverture de nouveau trade depuis cette carte.
-              if (status === "AVOID") return;
-
+              // d'ouverture de nouveau trade depuis cette carte.     
               onSendToCalculator({
-                entry: r.price,
-                stop: stopPrice,
-                takeProfit: sellPrice,
-                support: r.support,
-                resistance: r.resistance,
-                assetType: resultAssetType,
-                direction: isBearishLevels ? "short" : "long",
-                symbol: resultSymbol,
-                rawQuery: r.rawQuery || r.query,
-                verdict: r.verdict,
-                riskReward: r.riskReward ?? null,
-                sentinelScore: r.sentinel?.score ?? null,
-                sentinelStatus: r.sentinel?.status ?? null,
-              });
-            };
+              entry: r.price,
+              stop: stopPrice,
+              takeProfit: sellPrice,
+              support: r.support,
+              resistance: r.resistance,
+              assetType: resultAssetType,
+              direction: isBearishLevels ? "short" : "long",
+              symbol: resultSymbol,
+              rawQuery: r.rawQuery || r.query,
+              verdict: r.verdict,
+              riskReward: r.riskReward ?? null,
+              sentinelScore: r.sentinel?.score ?? null,
+              sentinelStatus: r.sentinel?.status ?? null,
+            });
+                        };
 
             return (
               <button
@@ -2316,8 +2314,8 @@ function TopMarkets({ watchlist, scanState, onSendToCalculator, onGoToHistorique
                   border: `1px solid ${LINE}`,
                   borderRadius: 10,
                   padding: "12px 14px",
-                  cursor: status === "AVOID" && !guidance ? "default" : "pointer",
-                  opacity: status === "AVOID" && !guidance ? 0.7 : 1,
+                  cursor: "pointer",=
+                  opacity: status === "AVOID" && !guidance ? 0.7 : 1, 
                   color: TEXT,
                   textAlign: "left",
                   width: "100%",
