@@ -2286,6 +2286,8 @@ function TopMarkets({ watchlist, scanState, onSendToCalculator, onGoToHistorique
                 return;
               }
 
+              if (status === "AVOID") return;
+
               // Pas de position existante : setup jugé à éviter par le moteur → pas
               // d'ouverture de nouveau trade depuis cette carte.     
               onSendToCalculator({
