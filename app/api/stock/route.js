@@ -78,7 +78,18 @@ function toValuesArray(result) {
 }
 
 function yahooFxSymbol(symbol) {
-  return `${symbol.toUpperCase()}USD=X`;
+  // Devises conventionnellement cotées avec l'USD comme MONNAIE DE BASE
+// (USD/JPY, USD/CHF, ...) plutôt que comme devise cotée contre l'USD.
+// Pour celles-ci, le ticker Yahoo doit être "USD" + symbole, pas l'inverse.
+const USD_BASE_CURRENCIES = ["JPY", "CHF", "CAD", "CNY", "INR", "MXN", "SEK", "NOK", "SGD"];
+
+function yahooFxSymbol(symbol) {
+  const s = symbol.toUpperCase();
+  if (USD_BASE_CURRENCIES.includes(s)) {
+    return `USD${s}=X`;
+  }
+  return `${s}USD=X`;
+}
 }
 
 export async function GET(request) {
