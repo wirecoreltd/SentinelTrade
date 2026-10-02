@@ -2510,6 +2510,26 @@ function Calculateur({ prefill }) {
   // compte réduit où "50€ de mise fixe" n'a plus de sens.
   const [totalCapital, setTotalCapital] = useState("50");
   const [riskPct, setRiskPct] = useState("8");
+  const [binanceMsg, setBinanceMsg] = useState("");
+  async function loadBinanceBalance() {
+    setBinanceMsg("Lecture du solde…");
+    try {
+      let token = window.localStorage.getItem("st_access_token");
+      if (!token) {
+        token = window.prompt("Mot de passe d'accès (APP_ACCESS_TOKEN) :");
+        if (!token) { setBinanceMsg(""); return; }
+      }
+      const res = await fetch("/api/binance/wallet", { headers: { "x-app-token": token }, cache: "no-store" });
+      const data = await res.json();
+      if (res.status === 401) window.localStorage.removeItem("st_access_token");
+      if (!data.ok) { setBinanceMsg(data.error || "Échec."); return; }
+      window.localStorage.setItem("st_access_token", token);
+      setTotalCapital(data.totalUsdt.toFixed(2));
+      setBinanceMsg(`Solde Binance : ${data.totalUsdt.toFixed(2)} USDT (≈ $).`);
+    } catch (e) {
+      setBinanceMsg("Impossible de joindre Binance.");
+    }
+  }
 
   // --- Trailing stop (aide à la décision, n'exécute rien sur le broker) ---
   const [trailingEnabled, setTrailingEnabled] = useState(false);
@@ -2791,6 +2811,10 @@ function Calculateur({ prefill }) {
             <div style={{ fontSize: 10, color: MUTED, marginBottom: 3 }}>Risque par trade (%)</div>
             <input value={riskPct} onChange={(e) => setRiskPct(e.target.value)} inputMode="decimal" style={{ width: "100%", background: PANEL, border: `1px solid ${LINE}`, borderRadius: 6, padding: "6px 8px", color: TEXT, fontSize: 13 }} />
           </div>
+        </div>
+        <div style={{ marginBottom: 8 }}>
+          <button onClick={loadBinanceBalance} style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 6, padding: "6px 10px", color: TEXT, fontSize: 12, cursor: "pointer" }}>Utiliser mon solde Binance</button>
+          {binanceMsg ? <span style={{ fontSize: 11, color: MUTED, marginLeft: 8 }}>{binanceMsg}</span> : null}
         </div>
         {suggestedInvested != null ? (
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
