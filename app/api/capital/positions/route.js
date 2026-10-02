@@ -11,7 +11,8 @@ export async function GET(request) {
   if (!tokenOk(request)) return NextResponse.json({ ok: false, error: "Accès refusé." }, { status: 401 });
 
   try {
-    const [accounts, pos] = await Promise.all([capitalGet("/api/v1/accounts"), capitalGet("/api/v1/positions")]);
+    const accounts = await capitalGet("/api/v1/accounts");
+    const pos = await capitalGet("/api/v1/positions");
     const acc = (accounts.accounts || []).find((a) => a.preferred) || accounts.accounts?.[0];
 
     const positions = [];
