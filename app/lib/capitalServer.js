@@ -1,4 +1,4 @@
-\import crypto from "crypto";
+import crypto from "crypto";
 
 // Client Capital.com côté serveur UNIQUEMENT, limité à des appels GET de lecture
 // (comptes, positions, prix). Aucune fonction d'ordre n'est implémentée ici.
