@@ -28,6 +28,7 @@ import { isMetal, fetchMetalPrice, coingeckoProxy, fetchCoinGeckoPrice, fetchAlp
 import { COINGECKO_TO_BINANCE, getBinanceSymbol, useBinanceLivePrices } from "../lib/binance";
 import HistoryTab from "../components/HistoryTab";
 import BinanceAccountTab from "../components/BinanceAccountTab";
+import CapitalAccountTab from "../components/CapitalAccountTab";
 
 // ---------- Helper: extrait un message d'erreur exploitable d'une réponse Alpha Vantage ----------
 function alphaVantageErrorMessage(data) {
@@ -3238,6 +3239,7 @@ export default function TradingApp() {
     { id: "calc", label: "Calculateur", icon: Calculator },
     { id: "historique", label: "Historique", icon: HistoryIcon },
     { id: "binance", label: "Mon Binance", icon: HistoryIcon },
+    { id: "capital", label: "Mon Capital", icon: HistoryIcon },
     { id: "precision", label: "Précision", icon: TrendingUp },
   ];
 
@@ -3327,6 +3329,7 @@ export default function TradingApp() {
         {tab === "calc" && <Calculateur prefill={prefillCalc} />}
         {tab === "historique" && <HistoryTab />}
         {tab === "binance" && <BinanceAccountTab />}
+        {tab === "capital" && <CapitalAccountTab />}
         {tab === "precision" && <SignalPrecisionTab />}
       </div>
     </div>
