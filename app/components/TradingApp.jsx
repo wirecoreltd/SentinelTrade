@@ -27,6 +27,7 @@ import { addTrade, checkGuidance, loadHistory, loadSettings, saveSettings, getOp
 import { isMetal, fetchMetalPrice, coingeckoProxy, fetchCoinGeckoPrice, fetchAlphaQuote, fetchFxQuote, cachedFetch } from "../lib/marketPrices";
 import { COINGECKO_TO_BINANCE, getBinanceSymbol, useBinanceLivePrices } from "../lib/binance";
 import HistoryTab from "../components/HistoryTab";
+import BinanceAccountTab from "../components/BinanceAccountTab";
 
 // ---------- Helper: extrait un message d'erreur exploitable d'une réponse Alpha Vantage ----------
 function alphaVantageErrorMessage(data) {
@@ -3236,6 +3237,7 @@ export default function TradingApp() {
     { id: "dossier", label: "Dossier", icon: FileText },
     { id: "calc", label: "Calculateur", icon: Calculator },
     { id: "historique", label: "Historique", icon: HistoryIcon },
+    { id: "binance", label: "Mon Binance", icon: HistoryIcon },
     { id: "precision", label: "Précision", icon: TrendingUp },
   ];
 
@@ -3324,6 +3326,7 @@ export default function TradingApp() {
         {tab === "dossier" && <Dossier setTab={setTab} setPrefillCalc={setPrefillCalc} />}
         {tab === "calc" && <Calculateur prefill={prefillCalc} />}
         {tab === "historique" && <HistoryTab />}
+        {tab === "binance" && <BinanceAccountTab />}
         {tab === "precision" && <SignalPrecisionTab />}
       </div>
     </div>
