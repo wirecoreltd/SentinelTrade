@@ -9,11 +9,11 @@ import { RefreshCw } from "lucide-react";
 import { PANEL, ACCENT, TEXT, MUTED, LINE, POS, NEG, AMBER } from "../lib/theme";
 import { formatPrice } from "../lib/format";
 
-function ema(values, period) {
+export function ema(values, period) {
   const k = 2 / (period + 1);
   return values.reduce((acc, v, i) => (i === 0 ? [v] : [...acc, v * k + acc[i - 1] * (1 - k)]), []);
 }
-function rsi(closes, period = 14) {
+export function rsi(closes, period = 14) {
   let g = 0, l = 0;
   for (let i = 1; i <= period; i++) { const d = closes[i] - closes[i - 1]; d >= 0 ? (g += d) : (l -= d); }
   g /= period; l /= period;
@@ -24,7 +24,7 @@ function rsi(closes, period = 14) {
   }
   return l === 0 ? 100 : 100 - 100 / (1 + g / l);
 }
-function atr(c, period = 14) {
+export function atr(c, period = 14) {
   const tr = c.slice(1).map((x, i) => Math.max(x.high - x.low, Math.abs(x.high - c[i].close), Math.abs(x.low - c[i].close)));
   return tr.slice(-period).reduce((s, v) => s + v, 0) / Math.min(period, tr.length);
 }
